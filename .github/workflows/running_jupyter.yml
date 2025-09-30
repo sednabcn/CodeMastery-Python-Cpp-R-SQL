@@ -1,0 +1,307 @@
+name: Run Jupyter Notebooks
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+  workflow_dispatch:
+
+jobs:
+  find-notebooks:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      has_notebooks: ${{ steps.set-matrix.outputs.has_notebooks }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Find all Jupyter notebooks
+      id: set-matrix
+      run: |
+        NOTEBOOKS=()
+        
+        for dir in python r docs scripts; do
+          if [ -d "$dir" ]; then
+            while IFS= read -r notebook; do
+              NOTEBOOKS+=("$notebook")
+            done < <(find "$dir" -name "*.ipynb" -not -path "*/.*" -not -path "*/.ipynb_checkpoints/*")
+          fi
+        done
+        
+        if [ ${#NOTEBOOKS[@]} -eq 0 ]; then
+          echo "has_notebooks=false" >> $GITHUB_OUTPUT
+          echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+        else
+          echo "has_notebooks=true" >> $GITHUB_OUTPUT
+          MATRIX_JSON=$(printf '%s\n' "${NOTEBOOKS[@]}" | jq -R . | jq -s 'map({notebook: ., name: (. | gsub("/"; "_") | gsub(".ipynb"; ""))}) | {include: .}')
+          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
+        fi
+
+  generate-requirements:
+    needs: find-notebooks
+    if: needs.find-notebooks.outputs.has_notebooks == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Install scanning tools
+      run: |
+        pip install pipreqs nbformat
+    
+    - name: Extract imports from notebooks
+      run: |
+        cat > extract_imports.py << 'EOF'
+        import json
+        import re
+        import sys
+        from pathlib import Path
+        import nbformat
+
+        def extract_imports_from_notebook(notebook_path):
+            """Extract all import statements from a Jupyter notebook."""
+            imports = set()
+            
+            try:
+                with open(notebook_path, 'r', encoding='utf-8') as f:
+                    nb = nbformat.read(f, as_version=4)
+                
+                for cell in nb.cells:
+                    if cell.cell_type == 'code':
+                        code = cell.source
+                        
+                        # Match: import module
+                        imports.update(re.findall(r'^\s*import\s+([a-zA-Z0-9_]+)', code, re.MULTILINE))
+                        
+                        # Match: from module import ...
+                        imports.update(re.findall(r'^\s*from\s+([a-zA-Z0-9_]+)', code, re.MULTILINE))
+            
+            except Exception as e:
+                print(f"Error processing {notebook_path}: {e}", file=sys.stderr)
+            
+            return imports
+
+        def main():
+            all_imports = set()
+            
+            # Find all notebooks
+            for notebook_path in Path('.').rglob('*.ipynb'):
+                # Skip checkpoints
+                if '.ipynb_checkpoints' in str(notebook_path):
+                    continue
+                
+                print(f"Scanning: {notebook_path}")
+                imports = extract_imports_from_notebook(notebook_path)
+                all_imports.update(imports)
+            
+            # Filter out standard library modules
+            stdlib_modules = {
+                'os', 'sys', 'json', 're', 'math', 'datetime', 'time', 'collections',
+                'itertools', 'functools', 'pathlib', 'typing', 'io', 'csv', 'random',
+                'subprocess', 'shutil', 'glob', 'tempfile', 'urllib', 'http', 'copy',
+                'pickle', 'hashlib', 'base64', 'unittest', 'logging', 'argparse', 'gc',
+                'warnings', 'traceback', 'inspect', 'contextlib', 'abc', 'enum'
+            }
+            
+            third_party = sorted(all_imports - stdlib_modules)
+            
+            print("\nThird-party packages found:")
+            for pkg in third_party:
+                print(f"  - {pkg}")
+            
+            # Save to file
+            with open('detected_imports.txt', 'w') as f:
+                for pkg in third_party:
+                    f.write(f"{pkg}\n")
+
+        if __name__ == '__main__':
+            main()
+        EOF
+        
+        python extract_imports.py
+    
+    - name: Generate requirements.txt with versions
+      run: |
+        cat > generate_requirements.py << 'EOF'
+        import subprocess
+        import sys
+
+        def get_package_version(package_name):
+            """Try to get the latest version of a package from PyPI."""
+            try:
+                result = subprocess.run(
+                    ['pip', 'index', 'versions', package_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                # Parse output to get available versions
+                for line in result.stdout.split('\n'):
+                    if 'Available versions:' in line:
+                        versions = line.split(':')[1].strip().split(',')
+                        if versions and versions[0].strip():
+                            return versions[0].strip()
+                
+                # Fallback: try pip show
+                result = subprocess.run(
+                    ['pip', 'show', package_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                
+                for line in result.stdout.split('\n'):
+                    if line.startswith('Version:'):
+                        return line.split(':')[1].strip()
+                        
+            except Exception as e:
+                print(f"Warning: Could not get version for {package_name}: {e}", file=sys.stderr)
+            
+            return None
+
+        # Common package name mappings (import name -> pip package name)
+        PACKAGE_MAPPINGS = {
+            'cv2': 'opencv-python',
+            'PIL': 'Pillow',
+            'sklearn': 'scikit-learn',
+            'skimage': 'scikit-image',
+            'yaml': 'PyYAML',
+            'dotenv': 'python-dotenv',
+            'dateutil': 'python-dateutil',
+            'bs4': 'beautifulsoup4',
+        }
+
+        def main():
+            with open('detected_imports.txt', 'r') as f:
+                packages = [line.strip() for line in f if line.strip()]
+            
+            requirements = []
+            
+            for package in packages:
+                # Map import name to package name if needed
+                pip_package = PACKAGE_MAPPINGS.get(package, package)
+                
+                print(f"Processing: {pip_package}")
+                version = get_package_version(pip_package)
+                
+                if version:
+                    requirements.append(f"{pip_package}=={version}")
+                else:
+                    requirements.append(pip_package)
+            
+            # Write requirements.txt
+            with open('requirements.txt', 'w') as f:
+                f.write("# Auto-generated from Jupyter notebooks\n")
+                f.write("# Generated on: " + subprocess.check_output(['date'], text=True).strip() + "\n\n")
+                for req in sorted(requirements):
+                    f.write(f"{req}\n")
+            
+            print("\nGenerated requirements.txt:")
+            with open('requirements.txt', 'r') as f:
+                print(f.read())
+
+        if __name__ == '__main__':
+            main()
+        EOF
+        
+        python generate_requirements.py
+    
+    - name: Upload requirements.txt
+      uses: actions/upload-artifact@v3
+      with:
+        name: requirements
+        path: requirements.txt
+        retention-days: 30
+
+  run-notebooks:
+    needs: [find-notebooks, generate-requirements]
+    if: needs.find-notebooks.outputs.has_notebooks == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.find-notebooks.outputs.matrix) }}
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+    
+    - name: Download generated requirements
+      uses: actions/download-artifact@v3
+      with:
+        name: requirements
+    
+    - name: Install dependencies
+      run: |
+        pip install --upgrade pip
+        pip install jupyter nbconvert nbformat
+        
+        if [ -f requirements.txt ]; then
+          pip install -r requirements.txt
+        fi
+    
+    - name: Execute notebook
+      run: |
+        jupyter nbconvert --to notebook --execute --inplace "${{ matrix.notebook }}" \
+          --ExecutePreprocessor.timeout=600
+      continue-on-error: true
+      id: execute
+    
+    - name: Upload executed notebook
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: executed-notebooks
+        path: ${{ matrix.notebook }}
+
+  commit-changes:
+    needs: [find-notebooks, run-notebooks, generate-requirements]
+    if: needs.find-notebooks.outputs.has_notebooks == 'true' && github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+    
+    - name: Download artifacts
+      uses: actions/download-artifact@v3
+      with:
+        path: artifacts
+    
+    - name: Move files to correct locations
+      run: |
+        # Move executed notebooks
+        if [ -d "artifacts/executed-notebooks" ]; then
+          cp -r artifacts/executed-notebooks/* .
+        fi
+        
+        # Move requirements.txt
+        if [ -f "artifacts/requirements/requirements.txt" ]; then
+          cp artifacts/requirements/requirements.txt .
+        fi
+    
+    - name: Commit and push
+      run: |
+        git config --local user.email "github-actions[bot]@users.noreply.github.com"
+        git config --local user.name "github-actions[bot]"
+        
+        git add requirements.txt
+        find . -name "*.ipynb" -not -path "*/.*" -exec git add {} \;
+        
+        if ! git diff --staged --quiet; then
+          git commit -m "chore: update notebooks and requirements [skip ci]"
+          git push
+        fi

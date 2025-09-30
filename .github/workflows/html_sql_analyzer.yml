@@ -1,0 +1,184 @@
+sql-quality-html:
+    name: SQL Analysis (HTML Version)
+    runs-on: ubuntu-latest
+    if: contains(github.event.head_commit.message, '.sql') || github.event_name == 'pull_request'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install Puppeteer
+        run: |
+          npm install puppeteer
+
+      - name: Find SQL files
+        id: find-sql
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            files=$(git diff --name-only --diff-filter=AM origin/${{ github.base_ref }}...HEAD | grep '\.sql$' || echo "")
+          else
+            files=$(git diff-tree --no-commit-id --name-only -r ${{ github.sha }} | grep '\.sql$' || echo "")
+          fi
+          
+          if [ -z "$files" ]; then
+            echo "No SQL files changed"
+            echo "has_files=false" >> $GITHUB_OUTPUT
+          else
+            echo "SQL files found: $files"
+            echo "has_files=true" >> $GITHUB_OUTPUT
+            echo "$files" > sql_files.txt
+          fi
+
+      - name: Create Puppeteer Wrapper Script
+        if: steps.find-sql.outputs.has_files == 'true'
+        run: |
+          cat > analyze_sql_with_html.js << 'EOF'
+          const puppeteer = require('puppeteer');
+          const fs = require('fs');
+          const path = require('path');
+
+          async function analyzeSQL(sqlFile) {
+            const sqlContent = fs.readFileSync(sqlFile, 'utf8');
+            const htmlPath = path.resolve('.github/scripts/utils/quality_utils/sql_analyzer.html');
+            
+            const browser = await puppeteer.launch({
+              headless: 'new',
+              args: ['--no-sandbox', '--disable-setuid-sandbox']
+            });
+            
+            const page = await browser.newPage();
+            await page.goto(`file://${htmlPath}`);
+            
+            // Inject SQL and run analysis
+            const results = await page.evaluate((sql) => {
+              document.getElementById('sqlInput').value = sql;
+              analyzeSQL();
+              
+              // Wait for results to be displayed
+              return new Promise((resolve) => {
+                setTimeout(() => {
+                  const metrics = document.getElementById('metrics').innerText;
+                  const analysis = document.getElementById('analysis').innerText;
+                  const score = document.getElementById('scoreCircle').innerText;
+                  
+                  resolve({
+                    score: parseInt(score),
+                    metrics: metrics,
+                    analysis: analysis
+                  });
+                }, 1000);
+              });
+            }, sqlContent);
+            
+            await browser.close();
+            
+            // Save results
+            const baseName = path.basename(sqlFile, '.sql');
+            fs.writeFileSync(
+              `${baseName}_quality_report.json`,
+              JSON.stringify(results, null, 2)
+            );
+            
+            // Create text report
+            const textReport = `
+          ======================================================================
+          SQL QUALITY ANALYSIS REPORT (HTML Analyzer)
+          ======================================================================
+          File: ${sqlFile}
+          Score: ${results.score}/100
+          ----------------------------------------------------------------------
+          
+          METRICS:
+          ${results.metrics}
+          
+          ANALYSIS:
+          ${results.analysis}
+          
+          ======================================================================
+            `.trim();
+            
+            fs.writeFileSync(`${baseName}_quality_report.txt`, textReport);
+            
+            console.log(`Analysis complete for ${sqlFile}`);
+            console.log(`Score: ${results.score}/100`);
+            
+            return results.score;
+          }
+
+          // Main execution
+          (async () => {
+            const sqlFile = process.argv[2];
+            if (!sqlFile) {
+              console.error('Usage: node analyze_sql_with_html.js <sql-file>');
+              process.exit(1);
+            }
+            
+            try {
+              const score = await analyzeSQL(sqlFile);
+              
+              // Exit with error if score is too low
+              if (score < 70) {
+                console.error(`Quality score ${score} is below threshold (70)`);
+                process.exit(1);
+              }
+              
+              process.exit(0);
+            } catch (error) {
+              console.error('Error during analysis:', error);
+              process.exit(1);
+            }
+          })();
+          EOF
+
+      - name: Run HTML-based SQL Analysis
+        if: steps.find-sql.outputs.has_files == 'true'
+        run: |
+          while IFS= read -r file; do
+            if [ -f "$file" ]; then
+              echo "Analyzing: $file"
+              node analyze_sql_with_html.js "$file"
+            fi
+          done < sql_files.txt
+
+      - name: Upload SQL Analysis Results
+        if: steps.find-sql.outputs.has_files == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql-quality-report-html
+          path: |
+            *_quality_report.json
+            *_quality_report.txt
+          retention-days: 30
+
+      - name: Comment PR with Results
+        if: github.event_name == 'pull_request' && steps.find-sql.outputs.has_files == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const reportFiles = fs.readdirSync('.').filter(f => f.endsWith('_quality_report.txt'));
+            
+            if (reportFiles.length > 0) {
+              let comment = '## 📊 SQL Code Quality Analysis (HTML Analyzer)\n\n';
+              
+              reportFiles.forEach(file => {
+                const content = fs.readFileSync(file, 'utf8');
+                comment += `### ${file}\n\`\`\`\n${content}\n\`\`\`\n\n`;
+              });
+              
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment
+              });
+            }
+
+

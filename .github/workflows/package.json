@@ -1,0 +1,33 @@
+{
+  "name": "codemastery-sql-analyzer",
+  "version": "1.0.0",
+  "description": "SQL Quality Analysis for CodeMastery-Python-Cpp-R-SQL repository",
+  "main": "analyze-sql.js",
+  "scripts": {
+    "analyze": "node analyze-sql.js",
+    "analyze:local": "node scripts/analyze-local.js",
+    "test": "echo \"No tests specified\" && exit 0",
+    "precommit": "npm run analyze"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/CodeMastery-Python-Cpp-R-SQL"
+  },
+  "keywords": [
+    "sql",
+    "analysis",
+    "quality",
+    "ci",
+    "github-actions",
+    "linting"
+  ],
+  "author": "Your Team",
+  "license": "MIT",
+  "dependencies": {
+    "js-yaml": "^4.1.0"
+  },
+  "devDependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

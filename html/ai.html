@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>simleng_ai - ML Strategy Assistant</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    
+    <style>
+        :root {
+            --bg-primary: #0f172a;
+            --bg-secondary: #1e293b;
+            --bg-tertiary: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #cbd5e1;
+            --text-muted: #64748b;
+            --border-color: #475569;
+            --accent-primary: #6366f1;
+            --accent-secondary: #8b5cf6;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --error: #ef4444;
+            --shadow: rgba(0, 0, 0, 0.3);
+            --glass: rgba(15, 23, 42, 0.8);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Header */
+        .chat-header {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 70px;
+            background: var(--glass);
+            backdrop-filter: blur(20px);
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 30px;
+            z-index: 1000;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .logo i {
+            font-size: 1.8rem;
+            color: var(--accent-primary);
+        }
+
+        .logo h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header-controls {
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 500;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-outline:hover {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+        }
+
+        /* Main Layout */
+        .chat-container {
+            display: flex;
+            height: 100vh;
+            padding-top: 70px;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 280px;
+            background: var(--bg-secondary);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .sidebar-header {
+            padding: 20px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .new-session-btn {
+            width: 100%;
+            background: var(--accent-primary);
+            color: white;
+            padding: 12px;
+            border-radius: 8px;
+            border: none;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .new-session-btn:hover {
+            background: var(--accent-secondary);
+            transform: translateY(-1px);
+        }
+
+        .session-list {
+            flex: 1;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .session-item {
+            padding: 12px;
+            border-radius: 8px;
+            cursor: pointer;
+            margin-bottom: 8px;
+            transition: all 0.2s ease;
+            border-left: 3px solid transparent;
+        }
+
+        .session-item:hover {
+            background: var(--bg-tertiary);
+        }
+
+        .session-item.active {
+            background: var(--bg-tertiary);
+            border-left-color: var(--accent-primary);
+        }
+
+        .session-title {
+            font-weight: 500;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+
+        .session-preview {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        /* Chat Area */
+        .chat-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--bg-primary);
+        }
+
+        .chat-messages {
+            flex: 1;
+            padding: 30px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .message {
+            display: flex;
+            gap: 15px;
+            animation: fadeInUp 0.3s ease;
+        }
+
+        .message.user {
+            flex-direction: row-reverse;
+        }
+
+        .message-avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 600;
+            flex-shrink: 0;
+        }
+
+        .user-avatar {
+            background: var(--accent-primary);
+            color: white;
+        }
+
+        .bot-avatar {
+            background: var(--bg-secondary);
+            color: var(--accent-primary);
+            border: 2px solid var(--accent-primary);
+        }
+
+        .message-content {
+            flex: 1;
+            max-width: 70%;
+        }
+
+        .message-bubble {
+            padding: 16px 20px;
+            border-radius: 18px;
+            position: relative;
+        }
+
+        .user .message-bubble {
+            background: var(--accent-primary);
+            color: white;
+            border-bottom-right-radius: 6px;
+        }
+
+        .bot .message-bubble {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+            border-bottom-left-radius: 6px;
+        }
+
+        .message-time {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-top: 5px;
+        }
+
+        .user .message-time {
+            text-align: right;
+        }
+
+        /* ML-Specific Features */
+        .ml-suggestion-card {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 20px;
+            margin: 10px 0;
+        }
+
+        .ml-suggestion-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .ml-suggestion-header i {
+            color: var(--accent-primary);
+            font-size: 1.2rem;
+        }
+
+        .ml-suggestion-title {
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .strategy-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 12px;
+            margin: 15px 0;
+        }
+
+        .strategy-option {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .strategy-option:hover {
+            border-color: var(--accent-primary);
+            transform: translateY(-2px);
+        }
+
+        .strategy-name {
+            font-weight: 600;
+            color: var(--text-primary);
+            margin-bottom: 5px;
+        }
+
+        .strategy-desc {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* Input Area */
+        .chat-input-container {
+            padding: 20px 30px;
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--border-color);
+        }
+
+        .input-wrapper {
+            display: flex;
+            align-items: flex-end;
+            gap: 12px;
+            background: var(--bg-primary);
+            border: 1px solid var(--border-color);
+            border-radius: 20px;
+            padding: 12px 20px;
+        }
+
+        .chat-input {
+            flex: 1;
+            background: transparent;
+            border: none;
+            outline: none;
+            color: var(--text-primary);
+            font-size: 16px;
+            resize: none;
+            max-height: 120px;
+            min-height: 24px;
+        }
+
+        .chat-input::placeholder {
+            color: var(--text-muted);
+        }
+
+        .input-actions {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .action-btn {
+            background: none;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            padding: 6px;
+            border-radius: 6px;
+            transition: all 0.2s ease;
+        }
+
+        .action-btn:hover {
+            color: var(--accent-primary);
+            background: var(--bg-secondary);
+        }
+
+        .send-btn {
+            background: var(--accent-primary);
+            color: white;
+            border: none;
+            border-radius: 50%;
+            width: 36px;
+            height: 36px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.3s ease;
+        }
+
+        .send-btn:hover {
+            background: var(--accent-secondary);
+            transform: scale(1.1);
+        }
+
+        .send-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Welcome Screen */
+        .welcome-screen {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .welcome-icon {
+            font-size: 4rem;
+            color: var(--accent-primary);
+            margin-bottom: 20px;
+        }
+
+        .welcome-title {
+            font-size: 2.5rem;
+            font-weight: 700;
+            margin-bottom: 15px;
+            background: linear-gradient(135deg, var(--accent-primary), var(--accent-secondary));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .welcome-subtitle {
+            font-size: 1.2rem;
+            color: var(--text-secondary);
+            margin-bottom: 40px;
+            max-width: 600px;
+        }
+
+        .quick-actions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 800px;
+        }
+
+        .quick-action {
+            background: var(--bg-secondary);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 25px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .quick-action:hover {
+            border-color: var(--accent-primary);
+            transform: translateY(-3px);
+            box-shadow: 0 10px 30px var(--shadow);
+        }
+
+        .quick-action i {
+            font-size: 2rem;
+            color: var(--accent-primary);
+            margin-bottom: 15px;
+        }
+
+        .quick-action h3 {
+            font-size: 1.2rem;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+        }
+
+        .quick-action p {
+            color: var(--text-secondary);
+            font-size: 0.9rem;
+        }
+
+        /* Code Display */
+        .code-block {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 0.9rem;
+            overflow-x: auto;
+        }
+
+        /* Typing Animation */
+        .typing-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-muted);
+            font-style: italic;
+        }
+
+        .typing-dots {
+            display: flex;
+            gap: 4px;
+        }
+
+        .typing-dot {
+            width: 6px;
+            height: 6px;
+            background: var(--accent-primary);
+            border-radius: 50%;
+            animation: typing 1.5s infinite;
+        }
+
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+        @keyframes typing {
+            0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+            30% { transform: translateY(-10px); opacity: 1; }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: 200px;
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+            
+            .chat-container {
+                flex-direction: column;
+            }
+            
+            .quick-actions {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <!-- Header -->
+    <div class="chat-header">
+        <div class="logo">
+            <i class="fas fa-brain"></i>
+            <h1>simleng_ai</h1>
+        </div>
+        
+        <div class="header-controls">
+            <button class="btn btn-outline" onclick="exportSession()">
+                <i class="fas fa-download"></i> Export
+            </button>
+            <button class="btn btn-outline" onclick="clearChat()">
+                <i class="fas fa-trash"></i> Clear
+            </button>
+            <button class="btn btn-outline" onclick="showSettings()">
+                <i class="fas fa-cog"></i>
+            </button>
+        </div>
+    </div>
+
+    <!-- Main Container -->
+    <div class="chat-container">
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <div class="sidebar-header">
+                <button class="new-session-btn" onclick="newSession()">
+                    <i class="fas fa-plus"></i> New ML Strategy Session
+                </button>
+            </div>
+            
+            <div class="session-list" id="sessionList">
+                <div class="session-item active" onclick="loadSession('current')">
+                    <div class="session-title">Classification Strategy</div>
+                    <div class="session-preview">Binary classification with feature selection...</div>
+                </div>
+                
+                <div class="session-item" onclick="loadSession('prev1')">
+                    <div class="session-title">Time Series Analysis</div>
+                    <div class="session-preview">Forecasting with ARIMA models...</div>
+                </div>
+                
+                <div class="session-item" onclick="loadSession('prev2')">
+                    <div class="session-title">Model Comparison</div>
+                    <div class="session-preview">XGBoost vs Random Forest performance...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Chat Area -->
+        <div class="chat-main">
+            <div class="chat-messages" id="chatMessages">
+                <!-- Welcome Screen -->
+                <div class="welcome-screen" id="welcomeScreen">
+                    <div class="welcome-icon">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <h2 class="welcome-title">simleng_ai Assistant</h2>
+                    <p class="welcome-subtitle">
+                        Your AI-powered machine learning strategy consultant. I can help you select optimal algorithms, 
+                        engineer features, and build robust classification models.
+                    </p>
+                    
+                    <div class="quick-actions">
+                        <div class="quick-action" onclick="startQuickAction('dataset')">
+                            <i class="fas fa-database"></i>
+                            <h3>Analyze Dataset</h3>
+                            <p>Upload or select a dataset for automatic analysis and strategy recommendations</p>
+                        </div>
+                        
+                        <div class="quick-action" onclick="startQuickAction('strategy')">
+                            <i class="fas fa-chess"></i>
+                            <h3>Choose Strategy</h3>
+                            <p>Get personalized ML strategy recommendations based on your data characteristics</p>
+                        </div>
+                        
+                        <div class="quick-action" onclick="startQuickAction('compare')">
+                            <i class="fas fa-balance-scale"></i>
+                            <h3>Compare Models</h3>
+                            <p>Compare multiple algorithms and find the best performing strategy for your use case</p>
+                        </div>
+                        
+                        <div class="quick-action" onclick="startQuickAction('tutorial')">
+                            <i class="fas fa-graduation-cap"></i>
+                            <h3>Learn ML</h3>
+                            <p>Interactive tutorials and guided learning for machine learning concepts</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Input Area -->
+            <div class="chat-input-container">
+                <div class="input-wrapper">
+                    <button class="action-btn" onclick="uploadDataset()" title="Upload Dataset">
+                        <i class="fas fa-upload"></i>
+                    </button>
+                    
+                    <button class="action-btn" onclick="attachCode()" title="Attach Code">
+                        <i class="fas fa-code"></i>
+                    </button>
+                    
+                    <textarea 
+                        class="chat-input" 
+                        id="chatInput" 
+                        placeholder="Ask about ML strategies, data analysis, model selection..."
+                        rows="1"
+                        onkeydown="handleKeyPress(event)"
+                        oninput="autoResize(this)"></textarea>
+                    
+                    <button class="action-btn" onclick="voiceInput()" title="Voice Input">
+                        <i class="fas fa-microphone"></i>
+                    </button>
+                    
+                    <button class="send-btn" onclick="sendMessage()" id="sendBtn">
+                        <i class="fas fa-paper-plane"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class SimlengAI {
+            constructor() {
+                this.messages = [];
+                this.currentSession = 'current';
+                this.isTyping = false;
+                this.init();
+            }
+
+            init() {
+                console.log('simleng_ai Assistant initialized');
+                this.setupEventListeners();
+                this.loadWelcomeMessage();
+            }
+
+            setupEventListeners() {
+                // Auto-resize textarea
+                const input = document.getElementById('chatInput');
+                input.addEventListener('input', () => this.autoResize(input));
+            }
+
+            autoResize(textarea) {
+                textarea.style.height = 'auto';
+                textarea.style.height = Math.min(textarea.scrollHeight, 120) + 'px';
+            }
+
+            handleKeyPress(event) {
+                if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault();
+                    this.sendMessage();
+                }
+            }
+
+            sendMessage() {
+                const input = document.getElementById('chatInput');
+                const message = input.value.trim();
+                
+                if (!message || this.isTyping) return;
+
+                // Hide welcome screen
+                const welcomeScreen = document.getElementById('welcomeScreen');
+                if (welcomeScreen) welcomeScreen.style.display = 'none';
+
+                // Add user message
+                this.addMessage(message, 'user');
+                input.value = '';
+                this.autoResize(input);
+
+                // Generate AI response
+                this.generateResponse(message);
+            }
+
+            addMessage(content, sender) {
+                const messagesContainer = document.getElementById('chatMessages');
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${sender}`;
+                
+                const time = new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                
+                messageDiv.innerHTML = `
+                    <div class="message-avatar ${sender}-avatar">
+                        ${sender === 'user' ? 'U' : '<i class="fas fa-brain"></i>'}
+                    </div>
+                    <div class="message-content">
+                        <div class="message-bubble">
+                            ${content}
+                        </div>
+                        <div class="message-time">${time}</div>
+                    </div>
+                `;
+                
+                messagesContainer.appendChild(messageDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+                
+                this.messages.push({content, sender, time});
+            }
+
+            showTyping() {
+                if (this.isTyping) return;
+                
+                this.isTyping = true;
+                const messagesContainer = document.getElementById('chatMessages');
+                const typingDiv = document.createElement('div');
+                typingDiv.className = 'message bot';
+                typingDiv.id = 'typingIndicator';
+                
+                typingDiv.innerHTML = `
+                    <div class="message-avatar bot-avatar">
+                        <i class="fas fa-brain"></i>
+                    </div>
+                    <div class="message-content">
+                        <div class="message-bubble">
+                            <div class="typing-indicator">
+                                <span>simleng_ai is thinking</span>
+                                <div class="typing-dots">
+                                    <div class="typing-dot"></div>
+                                    <div class="typing-dot"></div>
+                                    <div class="typing-dot"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+                
+                messagesContainer.appendChild(typingDiv);
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            hideTyping() {
+                const typingIndicator = document.getElementById('typingIndicator');
+                if (typingIndicator) {
+                    typingIndicator.remove();
+                }
+                this.isTyping = false;
+            }
+
+            generateResponse(userMessage) {
+                this.showTyping();
+                
+                setTimeout(() => {
+                    this.hideTyping();
+                    
+                    const response = this.getMLResponse(userMessage);
+                    this.addMessage(response, 'bot');
+                }, 1500 + Math.random() * 1000);
+            }
+
+            getMLResponse(message) {
+                const msg = message.toLowerCase();
+                
+                if (msg.includes('classification') || msg.includes('classify')) {
+                    return this.getClassificationResponse();
+                } else if (msg.includes('dataset') || msg.includes('data')) {
+                    return this.getDatasetResponse();
+                } else if (msg.includes('model') || msg.includes('algorithm')) {
+                    return this.getModelResponse();
+                } else if (msg.includes('feature') || msg.includes('engineering')) {
+                    return this.getFeatureResponse();
+                } else {
+                    return this.getGeneralResponse();
+                }
+            }
+
+            getClassificationResponse() {
+                return `
+                    <div class="ml-suggestion-card">
+                        <div class="ml-suggestion-header">
+                            <i class="fas fa-chess"></i>
+                            <span class="ml-suggestion-title">Classification Strategy Recommendations</span>
+                        </div>
+                        <p>Based on your request, here are the optimal strategies for classification:</p>
+                        
+                        <div class="strategy-grid">
+                            <div class="strategy-option" onclick="selectStrategy('binary')">
+                                <div class="strategy-name">Binary Classification</div>
+                                <div class="strategy-desc">Logistic Regression, SVM, XGBoost</div>
+                            </div>
+                            <div class="strategy-option" onclick="selectStrategy('multi')">
+                                <div class="strategy-name">Multi-Class</div>
+                                <div class="strategy-desc">Random Forest, Neural Networks</div>
+                            </div>
+                        </div>
+                        
+                        <div class="code-block">
+from simleng_ai import StrategyModel<br>
+model = StrategyModel(strategy="auto_classification")<br>
+model.fit(X_train, y_train)<br>
+results = model.evaluate(X_test, y_test)
+                        </div>
+                    </div>
+                `;
+            }
+
+            getDatasetResponse() {
+                return `I can help you analyze your dataset! simleng_ai includes built-in datasets like Iris, Banknote Authentication, and Pimas Diabetes for practice. 
+
+                For your own data, I'll automatically assess data quality, suggest preprocessing steps, and recommend the best ML strategies based on your data characteristics.
+
+                Would you like to start with one of our sample datasets or upload your own?`;
+            }
+
+            getModelResponse() {
+                return `simleng_ai supports multiple algorithm backends:
+
+                **scikit-learn**: Logistic Regression, Random Forest, SVM, XGBoost
+                **statsmodels**: Statistical modeling and hypothesis testing
+                **Future additions**: Deep learning, time-series models
+
+                I can help you compare models, tune hyperparameters, and select the optimal strategy for your specific use case.`;
+            }
+
+            getFeatureResponse() {
+                return `Feature engineering is crucial for model performance! simleng_ai provides:
+
+                - Automated feature selection using statistical tests
+                - Feature extraction with PCA and other techniques  
+                - Correlation analysis and multicollinearity detection
+                - Custom feature engineering strategies
+
+                What type of features are you working with?`;
+            }
+
+            getGeneralResponse() {
+                return `I'm your ML strategy assistant! I can help with:
+
+                - **Strategy Selection**: Choose optimal algorithms for your data
+                - **Model Comparison**: Compare performance across different approaches
+                - **Feature Engineering**: Automated feature selection and extraction
+                - **Data Analysis**: Quality assessment and preprocessing recommendations
+                - **Educational Support**: Learn ML concepts with hands-on examples
+
+                What would you like to explore?`;
+            }
+
+            startQuickAction(action) {
+                const actions = {
+                    'dataset': 'I want to analyze a dataset and get strategy recommendations',
+                    'strategy': 'Help me choose the best ML strategy for my problem',
+                    'compare': 'I need to compare different machine learning models',
+                    'tutorial': 'Show me how to use simleng_ai for beginners'
+                };
+                
+                document.getElementById('chatInput').value = actions[action];
+                this.sendMessage();
+            }
+
+            loadWelcomeMessage() {
+                // Show welcome screen by default
+            }
+
+            newSession() {
+                this.messages = [];
+                document.getElementById('chatMessages').innerHTML = `
+                    <div class="welcome-screen" id="welcomeScreen">
+                        <div class="welcome-icon">
+                            <i class="fas fa-brain"></i>
+                        </div>
+                        <h2 class="welcome-title">simleng_ai Assistant</h2>
+                        <p class="welcome-subtitle">
+                            Your AI-powered machine learning strategy consultant. I can help you select optimal algorithms, 
+                            engineer features, and build robust classification models.
+                        </p>
+                        
+                        <div class="quick-actions">
+                            <div class="quick-action" onclick="startQuickAction('dataset')">
+                                <i class="fas fa-database"></i>
+                                <h3>Analyze Dataset</h3>
+                                <p>Upload or select a dataset for automatic analysis and strategy recommendations</p>
+                            </div>
+                            
+                            <div class="quick-action" onclick="startQuickAction('strategy')">
+                                <i class="fas fa-chess"></i>
+                                <h3>Choose Strategy</h3>
+                                <p>Get personalized ML strategy recommendations based on your data characteristics</p>
+                            </div>
+                            
+                            <div class="quick-action" onclick="startQuickAction('compare')">
+                                <i class="fas fa-balance-scale"></i>
+                                <h3>Compare Models</h3>
+                                <p>Compare multiple algorithms and find the best performing strategy for your use case</p>
+                            </div>
+                            
+                            <div class="quick-action" onclick="startQuickAction('tutorial')">
+                                <i class="fas fa-graduation-cap"></i>
+                                <h3>Learn ML</h3>
+                                <p>Interactive tutorials and guided learning for machine learning concepts</p>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }
+
+	    exportSession() {
+                const sessionData = {
+                    messages: this.messages,
+                    timestamp: new Date().toISOString(),
+                    session: this.currentSession
+                };
+                
+                const blob = new Blob([JSON.stringify(sessionData, null, 2)], {
+                    type: 'application/json'
+                });
+                
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `simleng_ai_session_${new Date().toISOString().split('T')[0]}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+
+            clearChat() {
+                if (confirm('Are you sure you want to clear this chat session?')) {
+                    this.newSession();
+                }
+            }
+
+            showSettings() {
+                this.addMessage(`
+                    <div class="ml-suggestion-card">
+                        <div class="ml-suggestion-header">
+                            <i class="fas fa-cog"></i>
+                            <span class="ml-suggestion-title">Settings & Configuration</span>
+                        </div>
+                        <p><strong>Model Backend:</strong> scikit-learn (default)</p>
+                        <p><strong>Strategy Mode:</strong> Adaptive classification</p>
+                        <p><strong>Feature Selection:</strong> Automated</p>
+                        <p><strong>Validation:</strong> Cross-validation enabled</p>
+                        
+                        <div style="margin-top: 15px;">
+                            <button class="btn btn-outline" onclick="updateSettings('backend')">
+                                Change Backend
+                            </button>
+                            <button class="btn btn-outline" onclick="updateSettings('strategy')">
+                                Strategy Preferences
+                            </button>
+                        </div>
+                    </div>
+                `, 'bot');
+            }
+
+            loadSession(sessionId) {
+                // Remove active class from all sessions
+                document.querySelectorAll('.session-item').forEach(item => {
+                    item.classList.remove('active');
+                });
+                
+                // Add active class to clicked session
+                event.target.closest('.session-item').classList.add('active');
+                
+                this.currentSession = sessionId;
+                
+                // Load session-specific messages (simplified for demo)
+                const sessionMessages = {
+                    'current': [
+                        {content: 'I need help with binary classification on my dataset', sender: 'user', time: '10:30'},
+                        {content: this.getClassificationResponse(), sender: 'bot', time: '10:31'}
+                    ],
+                    'prev1': [
+                        {content: 'How do I forecast time series data?', sender: 'user', time: '09:15'},
+                        {content: 'For time series forecasting, I recommend starting with ARIMA models for linear trends, or LSTM networks for complex patterns...', sender: 'bot', time: '09:16'}
+                    ],
+                    'prev2': [
+                        {content: 'Compare XGBoost vs Random Forest', sender: 'user', time: '08:45'},
+                        {content: 'Both are excellent ensemble methods. XGBoost typically performs better on structured data with careful tuning...', sender: 'bot', time: '08:46'}
+                    ]
+                };
+                
+                this.messages = sessionMessages[sessionId] || [];
+                this.renderMessages();
+            }
+
+            renderMessages() {
+                const messagesContainer = document.getElementById('chatMessages');
+                messagesContainer.innerHTML = '';
+                
+                if (this.messages.length === 0) {
+                    this.newSession();
+                    return;
+                }
+                
+                this.messages.forEach(msg => {
+                    const messageDiv = document.createElement('div');
+                    messageDiv.className = `message ${msg.sender}`;
+                    
+                    messageDiv.innerHTML = `
+                        <div class="message-avatar ${msg.sender}-avatar">
+                            ${msg.sender === 'user' ? 'U' : '<i class="fas fa-brain"></i>'}
+                        </div>
+                        <div class="message-content">
+                            <div class="message-bubble">
+                                ${msg.content}
+                            </div>
+                            <div class="message-time">${msg.time}</div>
+                        </div>
+                    `;
+                    
+                    messagesContainer.appendChild(messageDiv);
+                });
+                
+                messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+
+            uploadDataset() {
+                const input = document.createElement('input');
+                input.type = 'file';
+                input.accept = '.csv,.json,.xlsx';
+                input.onchange = (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        this.addMessage(`📊 Dataset uploaded: ${file.name}`, 'user');
+                        
+                        setTimeout(() => {
+                            this.addMessage(`
+                                <div class="ml-suggestion-card">
+                                    <div class="ml-suggestion-header">
+                                        <i class="fas fa-database"></i>
+                                        <span class="ml-suggestion-title">Dataset Analysis Complete</span>
+                                    </div>
+                                    <p><strong>File:</strong> ${file.name}</p>
+                                    <p><strong>Type:</strong> ${file.type || 'Unknown'}</p>
+                                    <p><strong>Size:</strong> ${(file.size / 1024).toFixed(1)} KB</p>
+                                    
+                                    <div style="margin-top: 15px;">
+                                        <p>🔍 <strong>Recommended Analysis:</strong></p>
+                                        <ul style="margin-left: 20px; color: var(--text-secondary);">
+                                            <li>Data quality assessment</li>
+                                            <li>Feature correlation analysis</li>
+                                            <li>Strategy recommendation based on data characteristics</li>
+                                        </ul>
+                                    </div>
+                                </div>
+                            `, 'bot');
+                        }, 1000);
+                    }
+                };
+                input.click();
+            }
+
+            attachCode() {
+                this.addMessage('📎 Code attachment feature coming soon! You can paste code directly in the chat for now.', 'bot');
+            }
+
+            voiceInput() {
+                if ('webkitSpeechRecognition' in window) {
+                    const recognition = new webkitSpeechRecognition();
+                    recognition.continuous = false;
+                    recognition.interimResults = false;
+                    recognition.lang = 'en-US';
+                    
+                    recognition.onstart = () => {
+                        document.querySelector('.fa-microphone').style.color = 'var(--error)';
+                    };
+                    
+                    recognition.onresult = (event) => {
+                        const transcript = event.results[0][0].transcript;
+                        document.getElementById('chatInput').value = transcript;
+                        this.autoResize(document.getElementById('chatInput'));
+                    };
+                    
+                    recognition.onend = () => {
+                        document.querySelector('.fa-microphone').style.color = '';
+                    };
+                    
+                    recognition.start();
+                } else {
+                    this.addMessage('🎤 Voice input not supported in this browser. Try Chrome or Edge!', 'bot');
+                }
+            }
+
+            selectStrategy(strategyType) {
+                const strategies = {
+                    'binary': 'Binary Classification strategy selected. Recommended algorithms: Logistic Regression for interpretability, XGBoost for performance.',
+                    'multi': 'Multi-Class Classification strategy selected. Random Forest provides good baseline performance with feature importance.'
+                };
+                
+                this.addMessage(`✅ ${strategies[strategyType]}`, 'bot');
+            }
+
+            updateSettings(settingType) {
+                const settings = {
+                    'backend': 'Backend options: scikit-learn (current), statsmodels, or custom implementations.',
+                    'strategy': 'Strategy preferences: Balanced accuracy vs speed, interpretability vs performance.'
+                };
+                
+                this.addMessage(`⚙️ ${settings[settingType]}`, 'bot');
+            }
+        }
+
+        // Global functions for onclick handlers
+        function handleKeyPress(event) {
+            window.simlengAI.handleKeyPress(event);
+        }
+
+        function autoResize(textarea) {
+            window.simlengAI.autoResize(textarea);
+        }
+
+        function sendMessage() {
+            window.simlengAI.sendMessage();
+        }
+
+        function startQuickAction(action) {
+            window.simlengAI.startQuickAction(action);
+        }
+
+        function newSession() {
+            window.simlengAI.newSession();
+        }
+
+        function loadSession(sessionId) {
+            window.simlengAI.loadSession(sessionId);
+        }
+
+        function exportSession() {
+            window.simlengAI.exportSession();
+        }
+
+        function clearChat() {
+            window.simlengAI.clearChat();
+        }
+
+        function showSettings() {
+            window.simlengAI.showSettings();
+        }
+
+        function uploadDataset() {
+            window.simlengAI.uploadDataset();
+        }
+
+        function attachCode() {
+            window.simlengAI.attachCode();
+        }
+
+        function voiceInput() {
+            window.simlengAI.voiceInput();
+        }
+
+        function selectStrategy(strategyType) {
+            window.simlengAI.selectStrategy(strategyType);
+        }
+
+        function updateSettings(settingType) {
+            window.simlengAI.updateSettings(settingType);
+        }
+
+        // Initialize the application
+        document.addEventListener('DOMContentLoaded', function() {
+            window.simlengAI = new SimlengAI();
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,1335 @@
+# .github/workflows/advanced-sql-analysis.yml
+# Advanced SQL analysis with multiple database support and custom rules
+
+name: Advanced SQL Analysis
+
+on:
+  push:
+    branches: [ master, develop, staging ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    # Run weekly analysis on Sundays at 2 AM UTC
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+    inputs:
+      analysis_type:
+        description: 'Type of analysis to run'
+        required: true
+        default: 'full'
+        type: choice
+        options:
+        - full
+        - quick
+        - security
+        - performance
+      database_type:
+        description: 'Database type for specific rules'
+        required: false
+        default: 'postgresql'
+        type: choice
+        options:
+        - postgresql
+        - mysql
+        - sqlserver
+        - oracle
+        - sqlite
+      severity_threshold:
+        description: 'Minimum severity to report'
+        required: false
+        default: 'warning'
+        type: choice
+        options:
+        - error
+        - warning
+        - info
+
+env:
+  ANALYSIS_TYPE: ${{ github.event.inputs.analysis_type || 'full' }}
+  DATABASE_TYPE: ${{ github.event.inputs.database_type || 'postgresql' }}
+  SEVERITY_THRESHOLD: ${{ github.event.inputs.severity_threshold || 'warning' }}
+
+jobs:
+  setup-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+      
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        
+    - name: Generate analysis matrix
+      id: set-matrix
+      run: |
+        # Create matrix based on SQL directories found
+        DIRS=()
+        
+        for dir in sql migrations queries database/sql database/migrations; do
+          if [ -d "$dir" ] && find "$dir" -name "*.sql" | grep -q .; then
+            DIRS+=("$dir")
+          fi
+        done
+        
+        if [ ${#DIRS[@]} -eq 0 ]; then
+           echo "No SQL directories found. Skipping analysis."
+           echo "matrix={\"include\":[]}" >> $GITHUB_OUTPUT
+           exit 0
+        else
+          MATRIX_JSON=$(printf '%s\n' "${DIRS[@]}" | jq -R . | jq -s 'map({path: ., name: (. | gsub("/"; "_"))}) | {include: .}')
+          echo "matrix=${MATRIX_JSON}" >> $GITHUB_OUTPUT
+        fi
+
+  analyze-sql:
+    needs: setup-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.setup-matrix.outputs.matrix) }}
+      
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        cache: 'npm'
+
+    - name: Cache analysis dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          node_modules
+          ~/.npm
+        key: ${{ runner.os }}-sql-analyzer-${{ hashFiles('**/package-lock.json') }}
+        restore-keys: |
+          ${{ runner.os }}-sql-analyzer-
+
+    - name: Install dependencies
+      run: |
+        cat > package.json << 'EOF'
+        {
+          "name": "sql-analyzer",
+          "version": "1.0.0",
+          "dependencies": {
+          "jsdom": "^22.0.0",
+          "js-yaml": "^4.1.0",
+          "chalk": "^4.1.2",
+          "cli-progress": "^3.12.0"
+          }
+        }
+        EOF
+        npm install
+
+    - name: Create advanced SQL analyzer
+      run: |
+        cat > advanced-sql-analyzer.js << 'EOF'
+        const fs = require('fs');
+        const path = require('path');
+        const yaml = require('js-yaml');
+        const chalk = require('chalk');
+        const cliProgress = require('cli-progress');
+
+        class AdvancedSQLAnalyzer {
+          constructor(config = {}) {
+            this.config = {
+              databaseType: config.databaseType || 'postgresql',
+              severityThreshold: config.severityThreshold || 'warning',
+              analysisType: config.analysisType || 'full',
+              ...config
+            };
+            
+            this.severityLevels = { error: 3, warning: 2, info: 1 };
+            this.rules = this.loadRules();
+            this.stats = {
+              filesProcessed: 0,
+              totalIssues: 0,
+              issuesBySeverity: { error: 0, warning: 0, info: 0 },
+              ruleViolations: {}
+            };
+          }
+
+          loadRules() {
+            const baseRules = {
+              // Performance Rules
+              'select-star': {
+                name: 'Avoid SELECT *',
+                severity: 'warning',
+                pattern: /SELECT\s+\*/gi,
+                message: 'SELECT * can impact performance and maintainability',
+                suggestion: 'Specify only the columns you need'
+              },
+              
+              'missing-where': {
+                name: 'Missing WHERE clause',
+                severity: 'warning',
+                check: (sql) => sql.includes('FROM') && !sql.includes('WHERE') && !sql.includes('LIMIT'),
+                message: 'Query without WHERE clause may scan entire table',
+                suggestion: 'Add appropriate WHERE conditions or LIMIT clause'
+              },
+              
+              'function-in-where': {
+                name: 'Function in WHERE clause',
+                severity: 'error',
+                pattern: /WHERE[\s\S]*?\b(UPPER|LOWER|SUBSTRING|LENGTH|TRIM)\s*\(/gi,
+                message: 'Functions in WHERE clause prevent index usage',
+                suggestion: 'Move function to SELECT or use functional indexes'
+              },
+              
+              'leading-wildcard': {
+                name: 'Leading wildcard in LIKE',
+                severity: 'error',
+                pattern: /LIKE\s*'%/gi,
+                message: 'Leading wildcards prevent index usage',
+                suggestion: 'Use full-text search or reverse the search pattern'
+              },
+              
+              'order-without-limit': {
+                name: 'ORDER BY without LIMIT',
+                severity: 'info',
+                check: (sql) => sql.includes('ORDER BY') && !sql.includes('LIMIT'),
+                message: 'ORDER BY without LIMIT may sort entire result set',
+                suggestion: 'Consider adding LIMIT clause if appropriate'
+              },
+
+              // Security Rules
+              'sql-injection-risk': {
+                name: 'Potential SQL injection risk',
+                severity: 'error',
+                pattern: /WHERE[\s\S]*?['"]?\s*\+\s*['"]?|\$\{|\#{/gi,
+                message: 'Possible SQL injection vulnerability detected',
+                suggestion: 'Use parameterized queries or prepared statements'
+              },
+
+              // Database-specific rules
+              ...this.getDatabaseSpecificRules()
+            };
+
+            return baseRules;
+          }
+
+          getDatabaseSpecificRules() {
+            const rules = {};
+            
+            switch (this.config.databaseType) {
+              case 'postgresql':
+                rules['pg-ilike-performance'] = {
+                  name: 'PostgreSQL ILIKE performance',
+                  severity: 'warning',
+                  pattern: /\bILIKE\b/gi,
+                  message: 'ILIKE can be slower than LIKE with proper case handling',
+                  suggestion: 'Consider LIKE with UPPER/LOWER or use indexes'
+                };
+                break;
+                
+              case 'mysql':
+                rules['mysql-engine-hint'] = {
+                  name: 'MySQL engine considerations',
+                  severity: 'info',
+                  check: (sql) => sql.includes('ENGINE=') && !sql.includes('InnoDB'),
+                  message: 'Consider using InnoDB for better performance and features',
+                  suggestion: 'Use ENGINE=InnoDB unless specific requirements dictate otherwise'
+                };
+                break;
+                
+              case 'sqlserver':
+                rules['sqlserver-nolock-hint'] = {
+                  name: 'SQL Server NOLOCK hint',
+                  severity: 'warning',
+                  pattern: /WITH\s*\(\s*NOLOCK\s*\)/gi,
+                  message: 'NOLOCK can lead to dirty reads and inconsistent data',
+                  suggestion: 'Use appropriate isolation levels instead'
+                };
+                break;
+            }
+            
+            return rules;
+          }
+
+          async analyzeDirectory(dirPath) {
+            console.log(chalk.blue(`🔍 Analyzing SQL files in: ${dirPath}`));
+            
+            const files = this.findSQLFiles(dirPath);
+            if (files.length === 0) {
+              console.log(chalk.yellow('No SQL files found'));
+              return { files: [], summary: this.stats };
+            }
+
+            const progressBar = new cliProgress.SingleBar({
+              format: 'Progress |{bar}| {percentage}% | {value}/{total} Files | ETA: {eta}s',
+              barCompleteChar: '\u2588',
+              barIncompleteChar: '\u2591',
+              hideCursor: true
+            });
+
+            if (process.stdout.isTTY) {
+              progressBar.start(files.length, 0);
+            }
+
+            const results = [];
+            for (let i = 0; i < files.length; i++) {
+              const filePath = files[i];
+              try {
+                const content = fs.readFileSync(filePath, 'utf8');
+                if (content.trim()) {
+                  const result = await this.analyzeSQL(content, filePath);
+                  results.push(result);
+                  this.updateStats(result);
+                }
+              } catch (error) {
+                console.error(chalk.red(`Error analyzing ${filePath}: ${error.message}`));
+              }
+              
+              if (process.stdout.isTTY) {
+                progressBar.update(i + 1);
+              }
+            }
+
+            if (process.stdout.isTTY) {
+              progressBar.stop();
+            }
+
+            return { files: results, summary: this.stats };
+          }
+
+          async analyzeSQL(sql, filePath = '') {
+            const analysis = {
+              filePath,
+              timestamp: new Date().toISOString(),
+              metrics: this.calculateMetrics(sql),
+              issues: [],
+              suggestions: [],
+              patterns: this.detectPatterns(sql),
+              score: 100
+            };
+
+            // Run rule checks
+            for (const [ruleId, rule] of Object.entries(this.rules)) {
+              const violations = this.checkRule(sql, rule);
+              if (violations.length > 0) {
+                violations.forEach(violation => {
+                  analysis.issues.push({
+                    rule: ruleId,
+                    name: rule.name,
+                    severity: rule.severity,
+                    message: rule.message,
+                    suggestion: rule.suggestion,
+                    line: violation.line || 0,
+                    column: violation.column || 0
+                  });
+                });
+              }
+            }
+
+            // Calculate score based on issues
+            analysis.score = this.calculateScore(analysis);
+            
+            // Generate contextual suggestions
+            analysis.suggestions = this.generateSuggestions(analysis);
+
+            return analysis;
+          }
+
+          checkRule(sql, rule) {
+            const violations = [];
+            
+            if (rule.pattern) {
+              let match;
+              while ((match = rule.pattern.exec(sql)) !== null) {
+                violations.push({
+                  match: match[0],
+                  index: match.index,
+                  line: this.getLineNumber(sql, match.index)
+                });
+              }
+              rule.pattern.lastIndex = 0; // Reset regex
+            } else if (rule.check && typeof rule.check === 'function') {
+              if (rule.check(sql)) {
+                violations.push({ line: 1 });
+              }
+            }
+            
+            return violations;
+          }
+
+          calculateMetrics(sql) {
+            const lines = sql.split('\n');
+            return {
+              lineCount: lines.length,
+              nonEmptyLines: lines.filter(line => line.trim()).length,
+              charCount: sql.length,
+              wordCount: sql.split(/\s+/).length,
+              complexity: this.calculateComplexity(sql),
+              tableCount: this.countTables(sql),
+              joinCount: (sql.match(/\bJOIN\b/gi) || []).length,
+              subqueryCount: this.countSubqueries(sql),
+              functionCount: this.countFunctions(sql),
+              maxLineLength: Math.max(...lines.map(line => line.length))
+            };
+          }
+
+          calculateComplexity(sql) {
+            let score = 0;
+            const upperSQL = sql.toUpperCase();
+            
+            // Base complexity factors
+            score += (sql.match(/\bJOIN\b/gi) || []).length * 2;
+            score += (sql.match(/\bUNION\b/gi) || []).length * 3;
+            score += (sql.match(/\bEXISTS\b/gi) || []).length * 2;
+            score += (sql.match(/\bCASE\b/gi) || []).length * 1;
+            score += this.countSubqueries(sql) * 3;
+            
+            // Advanced patterns
+            if (upperSQL.includes('RECURSIVE')) score += 5;
+            if (upperSQL.includes('WINDOW')) score += 3;
+            if (upperSQL.includes('CTE') || upperSQL.includes('WITH')) score += 2;
+            
+            return {
+              score,
+              level: score < 5 ? 'Low' : score < 15 ? 'Medium' : 'High'
+            };
+          }
+
+          countTables(sql) {
+            const tablePattern = /(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)/gi;
+            const tables = new Set();
+            let match;
+            
+            while ((match = tablePattern.exec(sql)) !== null) {
+              tables.add(match[1].toLowerCase());
+            }
+            
+            return tables.size;
+          }
+
+          countSubqueries(sql) {
+            let count = 0;
+            let depth = 0;
+            let inString = false;
+            let stringChar = '';
+            
+            for (let i = 0; i < sql.length; i++) {
+              const char = sql[i];
+              
+              if (!inString && (char === '"' || char === "'")) {
+                inString = true;
+                stringChar = char;
+              } else if (inString && char === stringChar && sql[i-1] !== '\\') {
+                inString = false;
+              } else if (!inString) {
+                if (char === '(') {
+                  depth++;
+                } else if (char === ')') {
+                  depth--;
+                } else if (depth > 0) {
+                  const remaining = sql.substring(i);
+                  if (remaining.match(/^SELECT\b/i)) {
+                    count++;
+                  }
+                }
+              }
+            }
+            
+            return count;
+          }
+
+          countFunctions(sql) {
+            const functionPattern = /\b(COUNT|SUM|AVG|MAX|MIN|CONCAT|SUBSTRING|LENGTH|UPPER|LOWER|TRIM|COALESCE|CASE)\s*\(/gi;
+            return (sql.match(functionPattern) || []).length;
+          }
+
+          detectPatterns(sql) {
+            const patterns = [];
+            const upperSQL = sql.toUpperCase();
+            
+            if (upperSQL.includes('GROUP BY')) patterns.push('Aggregation');
+            if (upperSQL.includes('JOIN')) patterns.push('Join Operation');
+            if (upperSQL.includes('UNION')) patterns.push('Set Operation');
+            if (upperSQL.includes('EXISTS')) patterns.push('Existence Check');
+            if (upperSQL.includes('HAVING')) patterns.push('Group Filtering');
+            if (upperSQL.includes('WINDOW') || upperSQL.includes('OVER (')) patterns.push('Window Function');
+            if (upperSQL.includes('CTE') || upperSQL.includes('WITH')) patterns.push('Common Table Expression');
+            if (upperSQL.includes('RECURSIVE')) patterns.push('Recursive Query');
+            if (this.countSubqueries(sql) > 0) patterns.push('Subquery');
+            if (upperSQL.includes('CASE')) patterns.push('Conditional Logic');
+            if (upperSQL.includes('LIMIT') || upperSQL.includes('TOP')) patterns.push('Result Limiting');
+            if (upperSQL.includes('DISTINCT')) patterns.push('Deduplication');
+            if (upperSQL.includes('ORDER BY')) patterns.push('Sorting');
+            
+            return patterns;
+          }
+
+          calculateScore(analysis) {
+            let score = 100;
+            
+            // Deduct points based on severity and count
+            analysis.issues.forEach(issue => {
+              switch (issue.severity) {
+                case 'error': score -= 15; break;
+                case 'warning': score -= 10; break;
+                case 'info': score -= 5; break;
+              }
+            });
+            
+            // Complexity penalty
+            if (analysis.metrics.complexity.level === 'High') score -= 10;
+            else if (analysis.metrics.complexity.level === 'Medium') score -= 5;
+            
+            // Size penalty for very large queries
+            if (analysis.metrics.lineCount > 50) score -= 5;
+            if (analysis.metrics.maxLineLength > 150) score -= 5;
+            
+            return Math.max(0, Math.min(100, score));
+          }
+
+          generateSuggestions(analysis) {
+            const suggestions = [];
+            
+            // Performance suggestions
+            if (analysis.issues.some(i => i.severity === 'error')) {
+              suggestions.push('Address critical performance issues first');
+            }
+            
+            if (analysis.metrics.joinCount > 3) {
+              suggestions.push('Consider breaking complex joins into smaller, more manageable queries');
+            }
+            
+            if (analysis.metrics.complexity.level === 'High') {
+              suggestions.push('High complexity detected - consider refactoring for maintainability');
+            }
+            
+            if (analysis.metrics.lineCount > 30) {
+              suggestions.push('Long query detected - consider using views or stored procedures');
+            }
+            
+            // Pattern-specific suggestions
+            if (analysis.patterns.includes('Subquery')) {
+              suggestions.push('Evaluate if subqueries can be replaced with JOINs for better performance');
+            }
+            
+            if (analysis.patterns.includes('Window Function')) {
+              suggestions.push('Window functions detected - ensure proper partitioning for performance');
+            }
+            
+            return suggestions.slice(0, 5); // Limit to top 5 suggestions
+          }
+
+          getLineNumber(text, index) {
+            return text.substring(0, index).split('\n').length;
+          }
+
+          findSQLFiles(dir, files = []) {
+            if (!fs.existsSync(dir)) return files;
+            
+            const entries = fs.readdirSync(dir);
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry);
+              const stat = fs.statSync(fullPath);
+              
+              if (stat.isDirectory()) {
+                this.findSQLFiles(fullPath, files);
+              } else if (entry.toLowerCase().endsWith('.sql')) {
+                files.push(fullPath);
+              }
+            }
+            
+            return files;
+          }
+
+          updateStats(result) {
+            this.stats.filesProcessed++;
+            this.stats.totalIssues += result.issues.length;
+            
+            result.issues.forEach(issue => {
+              this.stats.issuesBySeverity[issue.severity]++;
+              
+              if (!this.stats.ruleViolations[issue.rule]) {
+                this.stats.ruleViolations[issue.rule] = 0;
+              }
+              this.stats.ruleViolations[issue.rule]++;
+            });
+          }
+
+          generateReport(results, format = 'json') {
+            const report = {
+              metadata: {
+                timestamp: new Date().toISOString(),
+                analyzer_version: '2.0.0',
+                database_type: this.config.databaseType,
+                analysis_type: this.config.analysisType
+              },
+              summary: this.stats,
+              results: results.files
+            };
+
+            switch (format) {
+              case 'html':
+                return this.generateHTMLReport(report);
+              case 'markdown':
+                return this.generateMarkdownReport(report);
+              default:
+                return JSON.stringify(report, null, 2);
+            }
+          }
+
+          generateHTMLReport(report) {
+            const avgScore = report.results.length > 0 
+              ? Math.round(report.results.reduce((sum, r) => sum + r.score, 0) / report.results.length)
+              : 100;
+
+            return `
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>SQL Analysis Report</title>
+                <style>
+                    body { font-family: Arial, sans-serif; margin: 40px; }
+                    .header { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 30px; }
+                    .score { font-size: 2em; font-weight: bold; color: ${avgScore >= 80 ? '#28a745' : avgScore >= 60 ? '#ffc107' : '#dc3545'}; }
+                    .file-result { border: 1px solid #ddd; margin: 20px 0; padding: 15px; border-radius: 5px; }
+                    .issue { padding: 8px; margin: 5px 0; border-radius: 4px; }
+                    .error { background: #f8d7da; border-left: 4px solid #dc3545; }
+                    .warning { background: #fff3cd; border-left: 4px solid #ffc107; }
+                    .info { background: #d1ecf1; border-left: 4px solid #17a2b8; }
+                    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; }
+                    .stat-card { background: #f8f9fa; padding: 15px; border-radius: 8px; text-align: center; }
+                </style>
+            </head>
+            <body>
+                <div class="header">
+                    <h1>SQL Analysis Report</h1>
+                    <p>Generated: ${report.metadata.timestamp}</p>
+                    <p>Database: ${report.metadata.database_type}</p>
+                    <div class="score">Average Score: ${avgScore}/100</div>
+                </div>
+                
+                <div class="stats">
+                    <div class="stat-card">
+                        <h3>${report.summary.filesProcessed}</h3>
+                        <p>Files Analyzed</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>${report.summary.totalIssues}</h3>
+                        <p>Total Issues</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>${report.summary.issuesBySeverity.error}</h3>
+                        <p>Errors</p>
+                    </div>
+                    <div class="stat-card">
+                        <h3>${report.summary.issuesBySeverity.warning}</h3>
+                        <p>Warnings</p>
+                    </div>
+                </div>
+
+                <h2>File Results</h2>
+                ${report.results.map(result => `
+                    <div class="file-result">
+                        <h3>${result.filePath} (Score: ${result.score}/100)</h3>
+                        <p><strong>Patterns:</strong> ${result.patterns.join(', ')}</p>
+                        <p><strong>Complexity:</strong> ${result.metrics.complexity.level}</p>
+                        
+                        ${result.issues.length > 0 ? `
+                            <h4>Issues:</h4>
+                            ${result.issues.map(issue => `
+                                <div class="issue ${issue.severity}">
+                                    <strong>${issue.name}</strong> (${issue.severity})<br>
+                                    ${issue.message}<br>
+                                    <em>Suggestion: ${issue.suggestion}</em>
+                                </div>
+                            `).join('')}
+                        ` : '<p>No issues found.</p>'}
+                        
+                        ${result.suggestions.length > 0 ? `
+                            <h4>Suggestions:</h4>
+                            <ul>${result.suggestions.map(s => `<li>${s}</li>`).join('')}</ul>
+                        ` : ''}
+                    </div>
+                `).join('')}
+            </body>
+            </html>`;
+          }
+
+          generateMarkdownReport(report) {
+            const avgScore = report.results.length > 0 
+              ? Math.round(report.results.reduce((sum, r) => sum + r.score, 0) / report.results.length)
+              : 100;
+
+            let markdown = `# SQL Analysis Report
+
+**Generated:** ${report.metadata.timestamp}  
+**Database Type:** ${report.metadata.database_type}  
+**Average Score:** ${avgScore}/100 ${avgScore >= 80 ? '🟢' : avgScore >= 60 ? '🟡' : '🔴'}
+
+## Summary
+
+| Metric | Count |
+|--------|-------|
+| Files Analyzed | ${report.summary.filesProcessed} |
+| Total Issues | ${report.summary.totalIssues} |
+| Errors | ${report.summary.issuesBySeverity.error} |
+| Warnings | ${report.summary.issuesBySeverity.warning} |
+| Info | ${report.summary.issuesBySeverity.info} |
+
+## File Results
+
+`;
+
+            report.results.forEach(result => {
+              markdown += `### ${result.filePath}
+
+**Score:** ${result.score}/100  
+**Complexity:** ${result.metrics.complexity.level}  
+**Patterns:** ${result.patterns.join(', ')}
+
+`;
+
+              if (result.issues.length > 0) {
+                markdown += `#### Issues:\n`;
+                result.issues.forEach(issue => {
+                  const emoji = issue.severity === 'error' ? '❌' : issue.severity === 'warning' ? '⚠️' : 'ℹ️';
+                  markdown += `${emoji} **${issue.name}** (${issue.severity})  \n${issue.message}  \n*Suggestion: ${issue.suggestion}*\n\n`;
+                });
+              }
+
+              if (result.suggestions.length > 0) {
+                markdown += `#### Suggestions:\n`;
+                result.suggestions.forEach(suggestion => {
+                  markdown += `- ${suggestion}\n`;
+                });
+                markdown += '\n';
+              }
+
+              markdown += '---\n\n';
+            });
+
+            return markdown;
+          }
+        }
+
+        // Main execution
+        async function main() {
+          try {
+            const config = {
+              databaseType: process.env.DATABASE_TYPE || 'postgresql',
+              severityThreshold: process.env.SEVERITY_THRESHOLD || 'warning',
+              analysisType: process.env.ANALYSIS_TYPE || 'full'
+            };
+
+            const analyzer = new AdvancedSQLAnalyzer(config);
+            const analysisPath = process.env.ANALYSIS_PATH || '${{ matrix.path }}';
+            
+            console.log(chalk.blue.bold('🚀 Advanced SQL Analysis Starting'));
+            console.log(chalk.gray(`Configuration: ${JSON.stringify(config, null, 2)}`));
+            
+            const results = await analyzer.analyzeDirectory(analysisPath);
+            
+            // Generate reports in multiple formats
+            const jsonReport = analyzer.generateReport(results, 'json');
+            const htmlReport = analyzer.generateReport(results, 'html');
+            const markdownReport = analyzer.generateReport(results, 'markdown');
+            
+            // Write report files
+            const reportPrefix = `sql-analysis-${{ matrix.name }}`;
+            fs.writeFileSync(`${reportPrefix}-report.json`, jsonReport);
+            fs.writeFileSync(`${reportPrefix}-report.html`, htmlReport);
+            fs.writeFileSync(`${reportPrefix}-report.md`, markdownReport);
+            
+            console.log(chalk.green.bold('✅ Analysis Complete!'));
+            console.log(chalk.blue(`📊 Files processed: ${results.summary.filesProcessed}`));
+            console.log(chalk.yellow(`⚠️ Total issues: ${results.summary.totalIssues}`));
+            
+            // Calculate overall metrics for GitHub Actions
+            const avgScore = results.files.length > 0 
+              ? Math.round(results.files.reduce((sum, r) => sum + r.score, 0) / results.files.length)
+              : 100;
+            
+            const hasErrors = results.summary.issuesBySeverity.error > 0;
+            const hasWarnings = results.summary.issuesBySeverity.warning > 0;
+            
+            // Set GitHub Actions outputs
+            if (process.env.GITHUB_ACTIONS) {
+                const fs = require('fs');
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `average_score=${avgScore}\n`);
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `files_analyzed=${results.summary.filesProcessed}\n`);
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `total_issues=${results.summary.totalIssues}\n`);
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_errors=${hasErrors}\n`);
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_warnings=${hasWarnings}\n`);
+                fs.appendFileSync(process.env.GITHUB_OUTPUT, `report_path=${reportPrefix}-report\n`);
+                }
+            
+            // Exit with appropriate code
+            if (hasErrors || (config.severityThreshold === 'warning' && hasWarnings)) {
+              console.log(chalk.red('❌ Analysis failed due to issues found'));
+              process.exit(1);
+            }
+            
+            console.log(chalk.green('✅ Analysis passed!'));
+            
+          } catch (error) {
+            console.error(chalk.red(`Fatal error: ${error.message}`));
+            console.error(error.stack);
+            process.exit(1);
+          }
+        }
+
+        main();
+        EOF
+
+    - name: Run advanced SQL analysis
+      env:
+        ANALYSIS_PATH: ${{ matrix.path }}
+        DATABASE_TYPE: ${{ env.DATABASE_TYPE }}
+        SEVERITY_THRESHOLD: ${{ env.SEVERITY_THRESHOLD }}
+        ANALYSIS_TYPE: ${{ env.ANALYSIS_TYPE }}
+      run: node advanced-sql-analyzer.js
+
+    - name: Upload analysis artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sql-analysis-${{ matrix.name }}
+        path: |
+          sql-analysis-${{ matrix.name }}-report.*
+        retention-days: 30
+
+  consolidate-results:
+    needs: [setup-matrix, analyze-sql]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+    - name: Download all analysis results
+      uses: actions/download-artifact@v4
+      with:
+        path: analysis-results
+        
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+        
+    - name: Consolidate and create summary report
+      run: |
+        npm install js-yaml
+        
+        cat > consolidate-reports.js << 'EOF'
+        const fs = require('fs');
+        const path = require('path');
+
+        class ReportConsolidator {
+          constructor() {
+            this.consolidatedData = {
+              metadata: {
+                timestamp: new Date().toISOString(),
+                total_paths_analyzed: 0,
+                consolidation_version: '1.0.0'
+              },
+              summary: {
+                filesProcessed: 0,
+                totalIssues: 0,
+                issuesBySeverity: { error: 0, warning: 0, info: 0 },
+                ruleViolations: {},
+                scoreDistribution: { excellent: 0, good: 0, fair: 0, poor: 0 },
+                averageScore: 0,
+                pathResults: []
+              },
+              detailedResults: [],
+              topIssues: [],
+              recommendations: []
+            };
+          }
+
+          async consolidateReports() {
+            console.log('🔄 Consolidating SQL analysis reports...');
+            
+            const resultsDir = 'analysis-results';
+            if (!fs.existsSync(resultsDir)) {
+              console.log('❌ No analysis results found');
+              return;
+            }
+
+            const artifactDirs = fs.readdirSync(resultsDir).filter(dir => 
+              fs.statSync(path.join(resultsDir, dir)).isDirectory()
+            );
+
+            console.log(`📂 Found ${artifactDirs.length} result directories`);
+
+            let allScores = [];
+            
+            for (const artifactDir of artifactDirs) {
+              const dirPath = path.join(resultsDir, artifactDir);
+              const jsonReportPath = path.join(dirPath, `${artifactDir}-report.json`);
+              
+              if (fs.existsSync(jsonReportPath)) {
+                try {
+                  const reportData = JSON.parse(fs.readFileSync(jsonReportPath, 'utf8'));
+                  this.processReport(reportData, artifactDir);
+                  
+                  // Collect scores for average calculation
+                  reportData.results.forEach(result => {
+                    allScores.push(result.score);
+                  });
+                  
+                  console.log(`✅ Processed report: ${artifactDir}`);
+                } catch (error) {
+                  console.error(`❌ Error processing ${jsonReportPath}: ${error.message}`);
+                }
+              }
+            }
+
+            // Calculate final statistics
+            this.calculateFinalStatistics(allScores);
+            
+            // Generate consolidated reports
+            await this.generateConsolidatedReports();
+            
+            console.log('✅ Consolidation complete!');
+          }
+
+          processReport(reportData, pathName) {
+            this.consolidatedData.metadata.total_paths_analyzed++;
+            
+            // Aggregate summary statistics
+            this.consolidatedData.summary.filesProcessed += reportData.summary.filesProcessed;
+            this.consolidatedData.summary.totalIssues += reportData.summary.totalIssues;
+            
+            // Merge issue counts by severity
+            Object.keys(reportData.summary.issuesBySeverity).forEach(severity => {
+              this.consolidatedData.summary.issuesBySeverity[severity] += 
+                reportData.summary.issuesBySeverity[severity];
+            });
+            
+            // Merge rule violations
+            Object.keys(reportData.summary.ruleViolations || {}).forEach(rule => {
+              if (!this.consolidatedData.summary.ruleViolations[rule]) {
+                this.consolidatedData.summary.ruleViolations[rule] = 0;
+              }
+              this.consolidatedData.summary.ruleViolations[rule] += 
+                reportData.summary.ruleViolations[rule];
+            });
+            
+            // Store path-specific results
+            const pathScore = reportData.results.length > 0 
+              ? Math.round(reportData.results.reduce((sum, r) => sum + r.score, 0) / reportData.results.length)
+              : 100;
+            
+            this.consolidatedData.summary.pathResults.push({
+              path: pathName.replace('sql-analysis-', '').replace('_', '/'),
+              filesCount: reportData.summary.filesProcessed,
+              issuesCount: reportData.summary.totalIssues,
+              averageScore: pathScore,
+              databaseType: reportData.metadata.database_type,
+              analysisType: reportData.metadata.analysis_type
+            });
+            
+            // Add detailed results with path context
+            reportData.results.forEach(result => {
+              this.consolidatedData.detailedResults.push({
+                ...result,
+                analysisPath: pathName.replace('sql-analysis-', '').replace('_', '/')
+              });
+            });
+            
+            // Track score distribution
+            reportData.results.forEach(result => {
+              if (result.score >= 90) this.consolidatedData.summary.scoreDistribution.excellent++;
+              else if (result.score >= 75) this.consolidatedData.summary.scoreDistribution.good++;
+              else if (result.score >= 60) this.consolidatedData.summary.scoreDistribution.fair++;
+              else this.consolidatedData.summary.scoreDistribution.poor++;
+            });
+          }
+
+          calculateFinalStatistics(allScores) {
+            // Calculate average score
+            if (allScores.length > 0) {
+              this.consolidatedData.summary.averageScore = 
+                Math.round(allScores.reduce((sum, score) => sum + score, 0) / allScores.length);
+            }
+            
+            // Generate top issues (most frequent rule violations)
+            const sortedRules = Object.entries(this.consolidatedData.summary.ruleViolations)
+              .sort(([,a], [,b]) => b - a)
+              .slice(0, 10);
+            
+            this.consolidatedData.topIssues = sortedRules.map(([rule, count]) => ({
+              rule,
+              count,
+              percentage: Math.round((count / this.consolidatedData.summary.totalIssues) * 100)
+            }));
+            
+            // Generate recommendations based on analysis
+            this.generateRecommendations();
+          }
+
+          generateRecommendations() {
+            const recommendations = [];
+            
+            // Score-based recommendations
+            if (this.consolidatedData.summary.averageScore < 70) {
+              recommendations.push({
+                priority: 'HIGH',
+                category: 'Quality',
+                message: 'Overall code quality is below acceptable threshold. Focus on addressing critical performance and security issues.',
+                action: 'Review and refactor queries with scores below 60'
+              });
+            }
+            
+            // Issue-specific recommendations
+            const errorCount = this.consolidatedData.summary.issuesBySeverity.error;
+            if (errorCount > 0) {
+              recommendations.push({
+                priority: 'CRITICAL',
+                category: 'Security/Performance',
+                message: `${errorCount} critical issues found that may impact security or performance`,
+                action: 'Address all error-level issues immediately'
+              });
+            }
+            
+            // Rule-specific recommendations
+            const topRule = this.consolidatedData.topIssues[0];
+            if (topRule && topRule.count > 5) {
+              recommendations.push({
+                priority: 'MEDIUM',
+                category: 'Pattern',
+                message: `Most common issue: ${topRule.rule} (${topRule.count} occurrences)`,
+                action: 'Create coding standards to prevent this pattern'
+              });
+            }
+            
+            // File distribution recommendations
+            if (this.consolidatedData.summary.filesProcessed > 50) {
+              recommendations.push({
+                priority: 'LOW',
+                category: 'Maintenance',
+                message: 'Large number of SQL files detected',
+                action: 'Consider implementing automated quality gates and regular reviews'
+              });
+            }
+            
+            this.consolidatedData.recommendations = recommendations;
+          }
+
+          async generateConsolidatedReports() {
+            // Generate JSON report
+            const jsonReport = JSON.stringify(this.consolidatedData, null, 2);
+            fs.writeFileSync('consolidated-sql-analysis.json', jsonReport);
+            
+            // Generate HTML report
+            const htmlReport = this.generateHTMLReport();
+            fs.writeFileSync('consolidated-sql-analysis.html', htmlReport);
+            
+            // Generate Markdown report
+            const markdownReport = this.generateMarkdownReport();
+            fs.writeFileSync('consolidated-sql-analysis.md', markdownReport);
+            
+            // Generate CSV summary for spreadsheet analysis
+            const csvReport = this.generateCSVReport();
+            fs.writeFileSync('sql-analysis-summary.csv', csvReport);
+            
+            console.log('📊 Generated consolidated reports:');
+            console.log('  - consolidated-sql-analysis.json');
+            console.log('  - consolidated-sql-analysis.html');
+            console.log('  - consolidated-sql-analysis.md');
+            console.log('  - sql-analysis-summary.csv');
+          }
+
+          generateHTMLReport() {
+            const avgScore = this.consolidatedData.summary.averageScore;
+            const scoreColor = avgScore >= 80 ? '#28a745' : avgScore >= 60 ? '#ffc107' : '#dc3545';
+            
+            return `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Consolidated SQL Analysis Report</title>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; background: #f8f9fa; }
+        .container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; border-radius: 12px; margin-bottom: 30px; text-align: center; }
+        .score-circle { width: 120px; height: 120px; border-radius: 50%; background: ${scoreColor}; display: flex; align-items: center; justify-content: center; margin: 20px auto; font-size: 2em; font-weight: bold; }
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
+        .stat-card { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); text-align: center; border-left: 5px solid #667eea; }
+        .chart-container { background: white; padding: 25px; border-radius: 12px; margin-bottom: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .path-results { background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .path-row { padding: 15px 20px; border-bottom: 1px solid #eee; display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 15px; align-items: center; }
+        .path-row:nth-child(even) { background: #f8f9fa; }
+        .recommendations { background: white; padding: 25px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .recommendation { padding: 15px; margin: 10px 0; border-radius: 8px; border-left: 4px solid; }
+        .rec-critical { background: #f8d7da; border-color: #dc3545; }
+        .rec-high { background: #fff3cd; border-color: #ffc107; }
+        .rec-medium { background: #d1ecf1; border-color: #17a2b8; }
+        .rec-low { background: #d4edda; border-color: #28a745; }
+        .progress-bar { background: #e9ecef; border-radius: 10px; height: 20px; overflow: hidden; margin: 10px 0; }
+        .progress-fill { height: 100%; border-radius: 10px; transition: width 0.3s ease; }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Consolidated SQL Analysis Report</h1>
+            <p>Generated: ${this.consolidatedData.metadata.timestamp}</p>
+            <div class="score-circle">${avgScore}</div>
+            <p>Overall Quality Score</p>
+        </div>
+
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>${this.consolidatedData.summary.filesProcessed}</h3>
+                <p>Total Files Analyzed</p>
+            </div>
+            <div class="stat-card">
+                <h3>${this.consolidatedData.metadata.total_paths_analyzed}</h3>
+                <p>Paths Analyzed</p>
+            </div>
+            <div class="stat-card">
+                <h3>${this.consolidatedData.summary.totalIssues}</h3>
+                <p>Total Issues Found</p>
+            </div>
+            <div class="stat-card">
+                <h3>${this.consolidatedData.summary.issuesBySeverity.error}</h3>
+                <p>Critical Issues</p>
+            </div>
+        </div>
+
+        <div class="chart-container">
+            <h2>📊 Score Distribution</h2>
+            <canvas id="scoreChart" width="400" height="200"></canvas>
+        </div>
+
+        <div class="chart-container">
+            <h2>🔍 Top Issues</h2>
+            <canvas id="issuesChart" width="400" height="300"></canvas>
+        </div>
+
+        <div class="path-results">
+            <h2 style="padding: 20px; margin: 0; background: #f8f9fa;">📁 Path Analysis Results</h2>
+            <div class="path-row" style="font-weight: bold; background: #e9ecef;">
+                <div>Path</div>
+                <div>Files</div>
+                <div>Issues</div>
+                <div>Score</div>
+            </div>
+            ${this.consolidatedData.summary.pathResults.map(path => `
+                <div class="path-row">
+                    <div>${path.path}</div>
+                    <div>${path.filesCount}</div>
+                    <div>${path.issuesCount}</div>
+                    <div style="font-weight: bold; color: ${path.averageScore >= 80 ? '#28a745' : path.averageScore >= 60 ? '#ffc107' : '#dc3545'}">${path.averageScore}/100</div>
+                </div>
+            `).join('')}
+        </div>
+
+        <div class="recommendations">
+            <h2>💡 Recommendations</h2>
+            ${this.consolidatedData.recommendations.map(rec => `
+                <div class="recommendation rec-${rec.priority.toLowerCase()}">
+                    <h4>${rec.priority} - ${rec.category}</h4>
+                    <p><strong>Issue:</strong> ${rec.message}</p>
+                    <p><strong>Action:</strong> ${rec.action}</p>
+                </div>
+            `).join('')}
+        </div>
+    </div>
+
+    <script>
+        // Score Distribution Chart
+        const scoreCtx = document.getElementById('scoreChart').getContext('2d');
+        new Chart(scoreCtx, {
+            type: 'doughnut',
+            data: {
+                labels: ['Excellent (90-100)', 'Good (75-89)', 'Fair (60-74)', 'Poor (<60)'],
+                datasets: [{
+                    data: [${this.consolidatedData.summary.scoreDistribution.excellent}, 
+                           ${this.consolidatedData.summary.scoreDistribution.good}, 
+                           ${this.consolidatedData.summary.scoreDistribution.fair}, 
+                           ${this.consolidatedData.summary.scoreDistribution.poor}],
+                    backgroundColor: ['#28a745', '#17a2b8', '#ffc107', '#dc3545']
+                }]
+            },
+            options: { responsive: true, maintainAspectRatio: false }
+        });
+
+        // Top Issues Chart
+        const issuesCtx = document.getElementById('issuesChart').getContext('2d');
+        new Chart(issuesCtx, {
+            type: 'bar',
+            data: {
+                labels: [${this.consolidatedData.topIssues.slice(0, 5).map(issue => `'${issue.rule}'`).join(', ')}],
+                datasets: [{
+                    label: 'Occurrences',
+                    data: [${this.consolidatedData.topIssues.slice(0, 5).map(issue => issue.count).join(', ')}],
+                    backgroundColor: '#667eea'
+                }]
+            },
+            options: { 
+                responsive: true, 
+                maintainAspectRatio: false,
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    </script>
+</body>
+</html>`;
+          }
+
+          generateMarkdownReport() {
+            return `# 🔍 Consolidated SQL Analysis Report
+
+**Generated:** ${this.consolidatedData.metadata.timestamp}  
+**Overall Quality Score:** ${this.consolidatedData.summary.averageScore}/100 ${this.consolidatedData.summary.averageScore >= 80 ? '🟢' : this.consolidatedData.summary.averageScore >= 60 ? '🟡' : '🔴'}
+
+## 📊 Summary Statistics
+
+| Metric | Value |
+|--------|--------|
+| Paths Analyzed | ${this.consolidatedData.metadata.total_paths_analyzed} |
+| Files Processed | ${this.consolidatedData.summary.filesProcessed} |
+| Total Issues | ${this.consolidatedData.summary.totalIssues} |
+| Critical Issues | ${this.consolidatedData.summary.issuesBySeverity.error} |
+| Warnings | ${this.consolidatedData.summary.issuesBySeverity.warning} |
+| Info Items | ${this.consolidatedData.summary.issuesBySeverity.info} |
+
+## 🎯 Score Distribution
+
+- **Excellent (90-100):** ${this.consolidatedData.summary.scoreDistribution.excellent} files
+- **Good (75-89):** ${this.consolidatedData.summary.scoreDistribution.good} files  
+- **Fair (60-74):** ${this.consolidatedData.summary.scoreDistribution.fair} files
+- **Poor (<60):** ${this.consolidatedData.summary.scoreDistribution.poor} files
+
+## 📁 Path Results
+
+| Path | Files | Issues | Avg Score |
+|------|-------|--------|-----------|
+${this.consolidatedData.summary.pathResults.map(path => 
+  `| ${path.path} | ${path.filesCount} | ${path.issuesCount} | ${path.averageScore}/100 ${path.averageScore >= 80 ? '🟢' : path.averageScore >= 60 ? '🟡' : '🔴'} |`
+).join('\n')}
+
+## 🔍 Top Issues
+
+${this.consolidatedData.topIssues.slice(0, 10).map((issue, index) => 
+  `${index + 1}. **${issue.rule}** - ${issue.count} occurrences (${issue.percentage}%)`
+).join('\n')}
+
+## 💡 Recommendations
+
+${this.consolidatedData.recommendations.map(rec => `
+### ${rec.priority === 'CRITICAL' ? '🚨' : rec.priority === 'HIGH' ? '⚠️' : rec.priority === 'MEDIUM' ? '🔔' : '💡'} ${rec.priority} Priority - ${rec.category}
+
+**Issue:** ${rec.message}  
+**Recommended Action:** ${rec.action}
+`).join('\n')}
+
+---
+
+*This report was generated automatically by the Advanced SQL Analysis workflow. For detailed file-specific results, check the individual analysis artifacts.*`;
+          }
+
+          generateCSVReport() {
+            let csv = 'Path,Files,Issues,Critical,Warning,Info,AverageScore\n';
+            
+            this.consolidatedData.summary.pathResults.forEach(path => {
+              csv += `"${path.path}",${path.filesCount},${path.issuesCount},0,0,0,${path.averageScore}\n`;
+            });
+            
+            return csv;
+          }
+        }
+
+        // Execute consolidation
+        async function main() {
+          try {
+            const consolidator = new ReportConsolidator();
+            await consolidator.consolidateReports();
+            
+            // Set GitHub Actions outputs
+            if (process.env.GITHUB_ACTIONS) {
+                      const fs = require('fs');
+                      const summary = consolidator.consolidatedData.summary;
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, `total_files=${summary.filesProcessed}\n`);
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, `total_issues=${summary.totalIssues}\n`);
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, `average_score=${summary.averageScore}\n`);
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, `critical_issues=${summary.issuesBySeverity.error}\n`);
+                      fs.appendFileSync(process.env.GITHUB_OUTPUT, `paths_analyzed=${consolidator.consolidatedData.metadata.total_paths_analyzed}\n`);
+                      }
+             
+          } catch (error) {
+            console.error('❌ Consolidation failed:', error.message);
+            process.exit(1);
+          }
+        }
+
+        main();
+        EOF
+
+        node consolidate-reports.js
+
+    - name: Upload consolidated reports
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: consolidated-sql-analysis-reports
+        path: |
+          consolidated-sql-analysis.*
+          sql-analysis-summary.csv
+        retention-days: 90
+
+    - name: Create PR comment with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          if (fs.existsSync('consolidated-sql-analysis.json')) {
+            const data = JSON.parse(fs.readFileSync('consolidated-sql-analysis.json', 'utf8'));
+            const summary = data.summary;
+            
+            const scoreEmoji = summary.averageScore >= 80 ? '🟢' : 
+                              summary.averageScore >= 60 ? '🟡' : '🔴';
+                              
+            const comment = `## 🔍 SQL Analysis Results ${scoreEmoji}
+            
+**Overall Quality Score:** ${summary.averageScore}/100
+
+| Metric | Count |
+|--------|--------|
+| Files Analyzed | ${summary.filesProcessed} |
+| Total Issues | ${summary.totalIssues} |
+| Critical Issues | ${summary.issuesBySeverity.error} |
+| Warnings | ${summary.issuesBySeverity.warning} |
+
+### 📁 Path Results
+${data.summary.pathResults.map(path => 
+  `- **${path.path}**: ${path.filesCount} files, ${path.issuesCount} issues, ${path.averageScore}/100 score`
+).join('\n')}
+
+${data.recommendations.length > 0 ? `
+### 💡 Key Recommendations
+${data.recommendations.slice(0, 3).map(rec => 
+  `- **${rec.category}**: ${rec.message}`
+).join('\n')}
+` : ''}
+
+[📊 View detailed HTML report](../actions/runs/${{ github.run_id }})`;
+
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment
+            });
+          }
+
+    - name: Summary
+      run: |
+        echo "🎉 Advanced SQL Analysis Complete!"
+        echo "📊 Check the uploaded artifacts for detailed reports"
+        echo "🔗 Consolidated reports available in 'consolidated-sql-analysis-reports' artifact"

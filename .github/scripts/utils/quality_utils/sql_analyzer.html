@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SQL Analyzer with Metrics</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #2c3e50, #34495e);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 10px;
+            font-weight: 300;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .main-content {
+            padding: 40px;
+        }
+
+        .input-section {
+            margin-bottom: 40px;
+        }
+
+        .textarea-container {
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 200px;
+            padding: 20px;
+            border: 2px solid #e0e0e0;
+            border-radius: 12px;
+            font-family: 'Monaco', 'Menlo', monospace;
+            font-size: 14px;
+            resize: vertical;
+            transition: all 0.3s ease;
+            background: #f8f9fa;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #667eea;
+            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+            background: white;
+        }
+
+        .analyze-btn {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.3);
+        }
+
+        .analyze-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .analyze-btn:active {
+            transform: translateY(0);
+        }
+
+        .results {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 30px;
+            margin-top: 40px;
+        }
+
+        .metrics-panel, .analysis-panel {
+            background: white;
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        .panel-title {
+            font-size: 1.5rem;
+            color: #2c3e50;
+            margin-bottom: 25px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .metric-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .metric-item:last-child {
+            border-bottom: none;
+        }
+
+        .metric-label {
+            font-weight: 600;
+            color: #555;
+        }
+
+        .metric-value {
+            font-weight: bold;
+            padding: 5px 15px;
+            border-radius: 20px;
+            background: #f8f9fa;
+            color: #2c3e50;
+        }
+
+        .complexity-low { background: #d4edda !important; color: #155724 !important; }
+        .complexity-medium { background: #fff3cd !important; color: #856404 !important; }
+        .complexity-high { background: #f8d7da !important; color: #721c24 !important; }
+
+        .analysis-section {
+            margin-bottom: 25px;
+        }
+
+        .analysis-section h3 {
+            color: #2c3e50;
+            margin-bottom: 15px;
+            font-size: 1.2rem;
+        }
+
+        .tag-list {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 15px;
+        }
+
+        .tag {
+            background: linear-gradient(135deg, #667eea, #764ba2);
+            color: white;
+            padding: 5px 12px;
+            border-radius: 15px;
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        .warning-tag {
+            background: linear-gradient(135deg, #e74c3c, #c0392b) !important;
+        }
+
+        .suggestion-list {
+            list-style: none;
+        }
+
+        .suggestion-list li {
+            background: #f8f9fa;
+            margin-bottom: 10px;
+            padding: 15px;
+            border-radius: 8px;
+            border-left: 4px solid #667eea;
+        }
+
+        .performance-score {
+            text-align: center;
+            margin-bottom: 30px;
+        }
+
+        .score-circle {
+            width: 120px;
+            height: 120px;
+            border-radius: 50%;
+            margin: 0 auto 15px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 2rem;
+            font-weight: bold;
+            color: white;
+            background: conic-gradient(from 0deg, #e74c3c 0deg, #f39c12 72deg, #27ae60 144deg);
+        }
+
+        .icon {
+            width: 24px;
+            height: 24px;
+            fill: currentColor;
+        }
+
+        @media (max-width: 768px) {
+            .results {
+                grid-template-columns: 1fr;
+            }
+            
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .main-content {
+                padding: 20px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>SQL Query Analyzer</h1>
+            <p>Comprehensive analysis with performance metrics and optimization suggestions</p>
+        </div>
+        
+        <div class="main-content">
+            <div class="input-section">
+                <div class="textarea-container">
+                    <textarea id="sqlInput" placeholder="Paste your SQL query here for analysis...
+
+Example:
+SELECT u.name, COUNT(o.id) as order_count, SUM(o.total) as total_spent
+FROM users u 
+LEFT JOIN orders o ON u.id = o.user_id 
+WHERE u.created_at > '2023-01-01'
+GROUP BY u.id, u.name 
+HAVING COUNT(o.id) > 5 
+ORDER BY total_spent DESC 
+LIMIT 10;"></textarea>
+                </div>
+                <button class="analyze-btn" onclick="analyzeSQL()">
+                    <svg class="icon" style="width: 20px; height: 20px; margin-right: 8px;" viewBox="0 0 24 24">
+                        <path d="M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z" />
+                    </svg>
+                    Analyze Query
+                </button>
+            </div>
+
+            <div id="results" class="results" style="display: none;">
+                <div class="metrics-panel">
+                    <h2 class="panel-title">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M16,11V3H8V9H2V21H22V11H16M10,5H14V9H10V5M4,11H9V19H4V11M11,11H20V19H11V11Z" />
+                        </svg>
+                        Query Metrics
+                    </h2>
+                    
+                    <div class="performance-score">
+                        <div id="scoreCircle" class="score-circle">0</div>
+                        <div>Performance Score</div>
+                    </div>
+
+                    <div id="metrics"></div>
+                </div>
+
+                <div class="analysis-panel">
+                    <h2 class="panel-title">
+                        <svg class="icon" viewBox="0 0 24 24">
+                            <path d="M19,3H5C3.9,3 3,3.9 3,5V19C3,20.1 3.9,21 5,21H19C20.1,21 21,20.1 21,19V5C21,3.9 20.1,3 19,3M5,7H19V5H5V7Z" />
+                        </svg>
+                        Analysis & Suggestions
+                    </h2>
+                    <div id="analysis"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function analyzeSQL() {
+            const sql = document.getElementById('sqlInput').value.trim();
+            if (!sql) {
+                alert('Please enter a SQL query to analyze.');
+                return;
+            }
+
+            const analysis = performAnalysis(sql);
+            displayResults(analysis);
+            document.getElementById('results').style.display = 'grid';
+        }
+
+        function performAnalysis(sql) {
+            const upperSQL = sql.toUpperCase();
+            
+            // Basic metrics
+            const metrics = {
+                lineCount: sql.split('\n').length,
+                charCount: sql.length,
+                wordCount: sql.split(/\s+/).length,
+                tableCount: countTables(sql),
+                joinCount: countJoins(sql),
+                subqueryCount: countSubqueries(sql),
+                functionCount: countFunctions(sql),
+                conditionCount: countConditions(sql)
+            };
+
+            // Complexity analysis
+            const complexity = calculateComplexity(sql, metrics);
+            
+            // Performance analysis
+            const performance = analyzePerformance(sql);
+            
+            // Detect query patterns
+            const patterns = detectPatterns(sql);
+            
+            // Generate suggestions
+            const suggestions = generateSuggestions(sql, performance, patterns);
+
+            // Calculate overall score
+            const score = calculateScore(complexity, performance, metrics);
+
+            return {
+                metrics,
+                complexity,
+                performance,
+                patterns,
+                suggestions,
+                score
+            };
+        }
+
+        function countTables(sql) {
+            const fromMatch = sql.match(/FROM\s+(\w+)/gi);
+            const joinMatch = sql.match(/JOIN\s+(\w+)/gi);
+            const tables = new Set();
+            
+            if (fromMatch) {
+                fromMatch.forEach(match => {
+                    const table = match.split(/\s+/)[1];
+                    tables.add(table.toLowerCase());
+                });
+            }
+            
+            if (joinMatch) {
+                joinMatch.forEach(match => {
+                    const table = match.split(/\s+/)[1];
+                    tables.add(table.toLowerCase());
+                });
+            }
+            
+            return tables.size;
+        }
+
+        function countJoins(sql) {
+            return (sql.match(/\bJOIN\b/gi) || []).length;
+        }
+
+        function countSubqueries(sql) {
+            let count = 0;
+            let depth = 0;
+            let inString = false;
+            let stringChar = '';
+            
+            for (let i = 0; i < sql.length; i++) {
+                const char = sql[i];
+                
+                if (!inString && (char === '"' || char === "'")) {
+                    inString = true;
+                    stringChar = char;
+                } else if (inString && char === stringChar) {
+                    inString = false;
+                    stringChar = '';
+                } else if (!inString) {
+                    if (char === '(') {
+                        depth++;
+                    } else if (char === ')') {
+                        depth--;
+                    } else if (depth > 0 && sql.substr(i, 6).toUpperCase() === 'SELECT') {
+                        count++;
+                    }
+                }
+            }
+            
+            return count;
+        }
+
+        function countFunctions(sql) {
+            const functions = ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CONCAT', 'SUBSTRING', 'LENGTH', 'UPPER', 'LOWER'];
+            let count = 0;
+            functions.forEach(func => {
+                const regex = new RegExp(`\\b${func}\\s*\\(`, 'gi');
+                const matches = sql.match(regex);
+                if (matches) count += matches.length;
+            });
+            return count;
+        }
+
+        function countConditions(sql) {
+            const whereMatch = sql.match(/WHERE\s+(.+?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+LIMIT|$)/i);
+            if (!whereMatch) return 0;
+            
+            const whereClause = whereMatch[1];
+            const conditions = whereClause.split(/\s+AND\s+|\s+OR\s+/gi);
+            return conditions.length;
+        }
+
+        function calculateComplexity(sql, metrics) {
+            let score = 0;
+            
+            // Base complexity
+            score += metrics.lineCount * 0.5;
+            score += metrics.joinCount * 3;
+            score += metrics.subqueryCount * 5;
+            score += metrics.functionCount * 1;
+            score += metrics.conditionCount * 2;
+            
+            // Additional complexity factors
+            if (sql.includes('UNION')) score += 4;
+            if (sql.includes('HAVING')) score += 2;
+            if (sql.includes('EXISTS')) score += 3;
+            if (sql.includes('CASE')) score += 2;
+            
+            if (score < 10) return { level: 'Low', score: Math.round(score) };
+            if (score < 25) return { level: 'Medium', score: Math.round(score) };
+            return { level: 'High', score: Math.round(score) };
+        }
+
+        function analyzePerformance(sql) {
+            const issues = [];
+            const warnings = [];
+            
+            // Check for SELECT *
+            if (sql.includes('SELECT *')) {
+                issues.push('Using SELECT * can impact performance');
+            }
+            
+            // Check for missing WHERE clause
+            if (!sql.includes('WHERE') && sql.includes('FROM')) {
+                warnings.push('No WHERE clause - may scan entire table');
+            }
+            
+            // Check for functions in WHERE clause
+            if (/WHERE.*\b(UPPER|LOWER|SUBSTRING|LENGTH)\(/i.test(sql)) {
+                issues.push('Functions in WHERE clause prevent index usage');
+            }
+            
+            // Check for LIKE with leading wildcard
+            if (sql.includes("LIKE '%")) {
+                issues.push('LIKE with leading wildcard prevents index usage');
+            }
+            
+            // Check for OR conditions
+            if (/WHERE.*\bOR\b/i.test(sql)) {
+                warnings.push('OR conditions can be slower than UNION');
+            }
+            
+            // Check for ORDER BY without LIMIT
+            if (sql.includes('ORDER BY') && !sql.includes('LIMIT')) {
+                warnings.push('ORDER BY without LIMIT may sort entire result set');
+            }
+            
+            return { issues, warnings };
+        }
+
+        function detectPatterns(sql) {
+            const patterns = [];
+            
+            if (sql.includes('GROUP BY')) patterns.push('Aggregation');
+            if (sql.includes('JOIN')) patterns.push('Join Operation');
+            if (sql.includes('UNION')) patterns.push('Set Operation');
+            if (sql.includes('EXISTS')) patterns.push('Existence Check');
+            if (sql.includes('HAVING')) patterns.push('Group Filtering');
+            if (countSubqueries(sql) > 0) patterns.push('Subquery');
+            if (sql.includes('CASE')) patterns.push('Conditional Logic');
+            if (sql.includes('LIMIT')) patterns.push('Result Limiting');
+            if (sql.includes('DISTINCT')) patterns.push('Deduplication');
+            if (sql.includes('ORDER BY')) patterns.push('Sorting');
+            
+            return patterns;
+        }
+
+        function generateSuggestions(sql, performance, patterns) {
+            const suggestions = [];
+            
+            // Performance-based suggestions
+            if (performance.issues.length > 0) {
+                suggestions.push('Consider adding indexes on columns used in WHERE clauses');
+                suggestions.push('Avoid functions in WHERE conditions when possible');
+            }
+            
+            if (sql.includes('SELECT *')) {
+                suggestions.push('Specify only required columns instead of SELECT *');
+            }
+            
+            if (sql.includes("LIKE '%")) {
+                suggestions.push('Consider full-text search instead of LIKE with leading wildcards');
+            }
+            
+            // Pattern-based suggestions
+            if (patterns.includes('Subquery')) {
+                suggestions.push('Consider if subqueries can be replaced with JOINs for better performance');
+            }
+            
+            if (patterns.includes('Join Operation') && countJoins(sql) > 3) {
+                suggestions.push('Review join order and consider breaking complex queries into smaller ones');
+            }
+            
+            if (!sql.includes('LIMIT') && patterns.includes('Sorting')) {
+                suggestions.push('Add LIMIT clause if you only need a subset of results');
+            }
+            
+            // General suggestions
+            suggestions.push('Test query performance with realistic data volumes');
+            suggestions.push('Consider using EXPLAIN PLAN to analyze execution strategy');
+            
+            return suggestions;
+        }
+
+        function calculateScore(complexity, performance, metrics) {
+            let score = 85; // Start with a good base score
+            
+            // Deduct for complexity
+            if (complexity.level === 'High') score -= 20;
+            else if (complexity.level === 'Medium') score -= 10;
+            
+            // Deduct for performance issues
+            score -= performance.issues.length * 5;
+            score -= performance.warnings.length * 3;
+            
+            // Deduct for very large queries
+            if (metrics.lineCount > 20) score -= 5;
+            if (metrics.joinCount > 5) score -= 5;
+            
+            return Math.max(0, Math.min(100, score));
+        }
+
+        function displayResults(analysis) {
+            displayMetrics(analysis);
+            displayAnalysis(analysis);
+        }
+
+        function displayMetrics(analysis) {
+            const metricsEl = document.getElementById('metrics');
+            const scoreEl = document.getElementById('scoreCircle');
+            
+            // Update score circle
+            scoreEl.textContent = analysis.score;
+            scoreEl.style.background = `conic-gradient(from 0deg, 
+                ${analysis.score < 60 ? '#e74c3c' : analysis.score < 80 ? '#f39c12' : '#27ae60'} 0deg, 
+                #ecf0f1 ${(analysis.score / 100) * 360}deg)`;
+            
+            const complexityClass = `complexity-${analysis.complexity.level.toLowerCase()}`;
+            
+            metricsEl.innerHTML = `
+                <div class="metric-item">
+                    <span class="metric-label">Lines of Code</span>
+                    <span class="metric-value">${analysis.metrics.lineCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Character Count</span>
+                    <span class="metric-value">${analysis.metrics.charCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Word Count</span>
+                    <span class="metric-value">${analysis.metrics.wordCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Tables Referenced</span>
+                    <span class="metric-value">${analysis.metrics.tableCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">JOIN Operations</span>
+                    <span class="metric-value">${analysis.metrics.joinCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Subqueries</span>
+                    <span class="metric-value">${analysis.metrics.subqueryCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Functions Used</span>
+                    <span class="metric-value">${analysis.metrics.functionCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">WHERE Conditions</span>
+                    <span class="metric-value">${analysis.metrics.conditionCount}</span>
+                </div>
+                <div class="metric-item">
+                    <span class="metric-label">Complexity Level</span>
+                    <span class="metric-value ${complexityClass}">${analysis.complexity.level} (${analysis.complexity.score})</span>
+                </div>
+            `;
+        }
+
+        function displayAnalysis(analysis) {
+            const analysisEl = document.getElementById('analysis');
+            
+            const patternTags = analysis.patterns.map(pattern => 
+                `<span class="tag">${pattern}</span>`
+            ).join('');
+            
+            const issueTags = analysis.performance.issues.map(issue => 
+                `<span class="tag warning-tag">${issue}</span>`
+            ).join('');
+            
+            const warningTags = analysis.performance.warnings.map(warning => 
+                `<span class="tag" style="background: linear-gradient(135deg, #f39c12, #e67e22) !important;">${warning}</span>`
+            ).join('');
+            
+            const suggestionItems = analysis.suggestions.map(suggestion => 
+                `<li>${suggestion}</li>`
+            ).join('');
+            
+            analysisEl.innerHTML = `
+                <div class="analysis-section">
+                    <h3>Query Patterns Detected</h3>
+                    <div class="tag-list">${patternTags || '<span style="color: #666;">No specific patterns detected</span>'}</div>
+                </div>
+                
+                <div class="analysis-section">
+                    <h3>Performance Issues</h3>
+                    <div class="tag-list">${issueTags || '<span style="color: #27ae60;">No major issues detected</span>'}</div>
+                </div>
+                
+                <div class="analysis-section">
+                    <h3>Performance Warnings</h3>
+                    <div class="tag-list">${warningTags || '<span style="color: #27ae60;">No warnings</span>'}</div>
+                </div>
+                
+                <div class="analysis-section">
+                    <h3>Optimization Suggestions</h3>
+                    <ul class="suggestion-list">${suggestionItems}</ul>
+                </div>
+            `;
+        }
+
+        // Auto-resize textarea
+        document.getElementById('sqlInput').addEventListener('input', function() {
+            this.style.height = 'auto';
+            this.style.height = Math.max(200, this.scrollHeight) + 'px';
+        });
+
+        // Allow Ctrl+Enter to analyze
+        document.getElementById('sqlInput').addEventListener('keydown', function(e) {
+            if (e.ctrlKey && e.key === 'Enter') {
+                analyzeSQL();
+            }
+        });
+    </script>
+</body>
+</html>

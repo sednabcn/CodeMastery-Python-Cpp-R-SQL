@@ -1,0 +1,213 @@
+# SQL Analysis Configuration
+# This file controls the behavior of SQL quality checks
+
+# Minimum acceptable score (0-100)
+# Files with scores below this will cause the workflow to fail
+min_score: 70
+
+# Directories to analyze (relative to repository root)
+paths:
+  - "sql/"
+  - "migrations/"
+  - "queries/"
+
+# File patterns to exclude from analysis
+exclude_patterns:
+  - "*test*.sql"
+  - "*temp*.sql"
+  - "*.bak.sql"
+  - "*example*.sql"
+  - "*sample*.sql"
+  - "*demo*.sql"
+
+# Maximum file size to analyze (in bytes)
+# Files larger than this will be skipped
+max_file_size: 1048576  # 1MB
+
+# Rule Configuration
+# Each rule can be enabled/disabled and has a severity level and point deduction
+rules:
+  # SELECT * - Avoid selecting all columns
+  select_star:
+    enabled: true
+    severity: "warning"  # error, warning, info
+    points: 10
+    description: "Using SELECT * can cause performance issues and breaks code when schema changes"
+
+  # Missing WHERE clause on table scans
+  missing_where:
+    enabled: true
+    severity: "error"
+    points: 20
+    description: "Queries without WHERE clauses can cause full table scans"
+
+  # Functions applied to columns in WHERE clause (non-SARGable)
+  functions_in_where:
+    enabled: true
+    severity: "error"
+    points: 15
+    description: "Functions on columns in WHERE prevent index usage"
+
+  # Leading wildcard in LIKE patterns
+  leading_wildcard_like:
+    enabled: true
+    severity: "error"
+    points: 15
+    description: "LIKE patterns starting with % cannot use indexes"
+
+  # Trailing wildcard LIKE
+  trailing_wildcard_like:
+    enabled: true
+    severity: "warning"
+    points: 5
+    description: "Ensure columns with trailing wildcard LIKE are indexed"
+
+  # ORDER BY without LIMIT
+  no_limit_with_order:
+    enabled: true
+    severity: "warning"
+    points: 8
+    description: "Sorting all rows without LIMIT is wasteful"
+
+  # Excessive number of JOINs
+  excessive_joins:
+    enabled: true
+    severity: "warning"
+    points: 10
+    threshold: 6  # Maximum number of JOINs before triggering
+    description: "Too many JOINs can cause performance degradation"
+
+  # Nested subqueries
+  nested_subqueries:
+    enabled: true
+    severity: "warning"
+    points: 12
+    threshold: 3  # Maximum depth of nested subqueries
+    description: "Deep nesting makes queries hard to optimize"
+
+  # SELECT DISTINCT usage
+  select_distinct:
+    enabled: true
+    severity: "info"
+    points: 5
+    description: "DISTINCT may indicate missing JOIN conditions or data quality issues"
+
+  # Multiple OR conditions in WHERE
+  or_in_where:
+    enabled: true
+    severity: "warning"
+    points: 8
+    description: "Multiple ORs can prevent efficient index usage"
+
+  # NOT IN clause
+  not_in_clause:
+    enabled: true
+    severity: "warning"
+    points: 10
+    description: "NOT IN is slow with large datasets, use NOT EXISTS instead"
+
+  # Implicit type conversion
+  implicit_type_conversion:
+    enabled: true
+    severity: "error"
+    points: 15
+    description: "Type mismatches prevent index usage"
+
+  # Missing index hints (advanced)
+  missing_index_hint:
+    enabled: false
+    severity: "info"
+    points: 0
+    description: "Consider adding index hints for complex queries"
+
+  # UNION without ALL
+  union_without_all:
+    enabled: true
+    severity: "info"
+    points: 5
+    description: "UNION performs implicit DISTINCT which is expensive"
+
+  # COUNT(*) usage
+  count_star:
+    enabled: false
+    severity: "info"
+    points: 0
+    description: "COUNT(*) is generally fine for most databases"
+
+  # Missing table aliases in JOINs
+  missing_table_alias:
+    enabled: true
+    severity: "info"
+    points: 3
+    description: "Table aliases improve readability and maintenance"
+
+  # CROSS JOIN usage
+  cross_join:
+    enabled: true
+    severity: "error"
+    points: 20
+    description: "CROSS JOIN creates Cartesian products and is usually unintentional"
+
+# Reporting Configuration
+reporting:
+  # Generate HTML report in addition to JSON
+  generate_html_report: false
+  
+  # Include optimization suggestions in reports
+  include_suggestions: true
+  
+  # Maximum number of suggestions per file to display
+  max_suggestions_per_file: 5
+  
+  # Create or update PR comments with results
+  create_pr_comment: true
+  
+  # Fail the workflow if critical errors are found
+  fail_on_errors: true
+  
+  # Fail the workflow if warnings are found
+  fail_on_warnings: false
+  
+  # Fail the workflow if score is below minimum
+  fail_on_low_score: true
+
+# Complexity Thresholds
+# Used to categorize query complexity
+complexity:
+  low: 10      # Simple queries (1-2 tables, basic conditions)
+  medium: 25   # Moderate queries (3-5 tables, some aggregations)
+  high: 50     # Complex queries (6+ tables, multiple subqueries)
+
+# Performance Thresholds
+thresholds:
+  max_joins: 6
+  max_subqueries: 3
+  max_line_length: 120
+  max_query_lines: 200
+
+# Database-specific settings (optional)
+# Adjust rules based on your database system
+database:
+  type: "generic"  # Options: generic, postgresql, mysql, mssql, oracle
+  version: ""      # Specific version if needed
+
+# Custom patterns (advanced)
+# Add custom regex patterns to detect
+custom_patterns:
+  # Example: Detect deprecated functions
+  # - pattern: "\\bTO_DATE\\b"
+  #   severity: "warning"
+  #   message: "Consider using standard date functions"
+  #   points: 5
+
+# File-specific overrides (optional)
+# Override rules for specific paths
+overrides:
+  # Example: More lenient rules for migration files
+  - path: "migrations/**"
+    rules:
+      missing_where:
+        enabled: false  # Migrations often need full table updates
+      select_star:
+        severity: "info"  # Less strict for one-time migrations
+

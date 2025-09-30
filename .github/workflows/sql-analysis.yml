@@ -1,0 +1,681 @@
+# Complete SQL Analysis Workflow
+# Analyzes SQL files in migrations/, queries/, and sql/ directories
+name: SQL Quality Analysis
+
+on:
+  pull_request:
+    paths:
+      - '**.sql'
+      - 'migrations/**'
+      - 'queries/**'
+      - 'sql/**'
+  push:
+    branches:
+      - main
+      - master
+      - develop
+    paths:
+      - '**.sql'
+      - 'migrations/**'
+      - 'queries/**'
+      - 'sql/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  sql-analysis:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+    
+    - name: Install dependencies
+      run: |
+        npm init -y
+        npm install js-yaml@4.1.0
+    
+    - name: Create SQL Analyzer
+      run: |
+        cat > analyze-sql.js << 'ANALYZER_EOF'
+        const fs = require('fs');
+        const path = require('path');
+        const yaml = require('js-yaml');
+
+        // SQL Analysis Configuration
+        const DEFAULT_CONFIG = {
+          min_score: 70,
+          paths: ['sql/', 'migrations/', 'queries/'],
+          exclude_patterns: ['*test*.sql', '*temp*.sql', '*.bak.sql', '*example*.sql'],
+          max_file_size: 1024 * 1024, // 1MB
+          rules: {
+            select_star: { enabled: true, severity: 'warning', points: 10 },
+            missing_where: { enabled: true, severity: 'error', points: 20 },
+            functions_in_where: { enabled: true, severity: 'error', points: 15 },
+            leading_wildcard_like: { enabled: true, severity: 'error', points: 15 },
+            trailing_wildcard_like: { enabled: true, severity: 'warning', points: 5 },
+            no_limit_with_order: { enabled: true, severity: 'warning', points: 8 },
+            excessive_joins: { enabled: true, severity: 'warning', points: 10, threshold: 6 },
+            nested_subqueries: { enabled: true, severity: 'warning', points: 12, threshold: 3 },
+            select_distinct: { enabled: true, severity: 'info', points: 5 },
+            or_in_where: { enabled: true, severity: 'warning', points: 8 },
+            not_in_clause: { enabled: true, severity: 'warning', points: 10 },
+            implicit_type_conversion: { enabled: true, severity: 'error', points: 15 },
+            missing_index_hint: { enabled: false, severity: 'info', points: 0 },
+            union_without_all: { enabled: true, severity: 'info', points: 5 },
+            count_star: { enabled: false, severity: 'info', points: 0 },
+            missing_table_alias: { enabled: true, severity: 'info', points: 3 },
+            cross_join: { enabled: true, severity: 'error', points: 20 }
+          }
+        };
+
+        class SQLAnalyzer {
+          constructor(config = DEFAULT_CONFIG) {
+            this.config = config;
+            this.results = {
+              files: [],
+              summary: {
+                total_files: 0,
+                total_issues: 0,
+                average_score: 0,
+                critical_issues: 0,
+                warnings: 0,
+                info: 0
+              }
+            };
+          }
+
+          shouldAnalyzeFile(filePath) {
+            // Check if file is in included paths
+            const inIncludedPath = this.config.paths.some(p => 
+              filePath.includes(p) || filePath.endsWith('.sql')
+            );
+            
+            if (!inIncludedPath) return false;
+
+            // Check exclusion patterns
+            const excluded = this.config.exclude_patterns.some(pattern => {
+              const regex = new RegExp(pattern.replace(/\*/g, '.*'));
+              return regex.test(filePath);
+            });
+
+            return !excluded;
+          }
+
+          analyzeSQL(sql, filePath) {
+            const issues = [];
+            let score = 100;
+            const sqlUpper = sql.toUpperCase();
+            const sqlLower = sql.toLowerCase();
+
+            // Rule: SELECT *
+            if (this.config.rules.select_star.enabled && /SELECT\s+\*/i.test(sql)) {
+              issues.push({
+                rule: 'select_star',
+                severity: this.config.rules.select_star.severity,
+                message: 'SELECT * detected - specify columns explicitly for better performance',
+                line: this.findLineNumber(sql, /SELECT\s+\*/i),
+                suggestion: 'Replace SELECT * with specific column names'
+              });
+              score -= this.config.rules.select_star.points;
+            }
+
+            // Rule: Missing WHERE clause on table scans
+            if (this.config.rules.missing_where.enabled) {
+              const hasFrom = /FROM\s+\w+/i.test(sql);
+              const hasWhere = /WHERE/i.test(sql);
+              const hasLimit = /LIMIT/i.test(sql);
+              const hasJoin = /JOIN/i.test(sql);
+              
+              if (hasFrom && !hasWhere && !hasLimit && !hasJoin && !sql.includes('COUNT(*)')) {
+                issues.push({
+                  rule: 'missing_where',
+                  severity: this.config.rules.missing_where.severity,
+                  message: 'Table scan without WHERE clause detected - can cause full table scans',
+                  line: this.findLineNumber(sql, /FROM/i),
+                  suggestion: 'Add WHERE clause to filter rows or use LIMIT to restrict results'
+                });
+                score -= this.config.rules.missing_where.points;
+              }
+            }
+
+            // Rule: Functions in WHERE clause (non-SARGable)
+            if (this.config.rules.functions_in_where.enabled) {
+              const functionsInWhere = [
+                /WHERE.*UPPER\s*\(/i,
+                /WHERE.*LOWER\s*\(/i,
+                /WHERE.*SUBSTRING\s*\(/i,
+                /WHERE.*DATE\s*\(/i,
+                /WHERE.*YEAR\s*\(/i,
+                /WHERE.*MONTH\s*\(/i,
+                /WHERE.*CAST\s*\(/i,
+                /WHERE.*CONVERT\s*\(/i
+              ];
+
+              functionsInWhere.forEach(pattern => {
+                if (pattern.test(sql)) {
+                  issues.push({
+                    rule: 'functions_in_where',
+                    severity: this.config.rules.functions_in_where.severity,
+                    message: 'Function applied to column in WHERE clause - prevents index usage',
+                    line: this.findLineNumber(sql, pattern),
+                    suggestion: 'Move function to the comparison value or create computed column/index'
+                  });
+                  score -= this.config.rules.functions_in_where.points;
+                }
+              });
+            }
+
+            // Rule: Leading wildcard LIKE
+            if (this.config.rules.leading_wildcard_like.enabled && /LIKE\s+['"][%]/i.test(sql)) {
+              issues.push({
+                rule: 'leading_wildcard_like',
+                severity: this.config.rules.leading_wildcard_like.severity,
+                message: 'Leading wildcard in LIKE pattern - cannot use indexes',
+                line: this.findLineNumber(sql, /LIKE\s+['"][%]/i),
+                suggestion: 'Use full-text search or remove leading wildcard if possible'
+              });
+              score -= this.config.rules.leading_wildcard_like.points;
+            }
+
+            // Rule: Trailing wildcard LIKE without index
+            if (this.config.rules.trailing_wildcard_like.enabled && 
+                /LIKE\s+['"][^%]*[%]['"]/i.test(sql) && 
+                !/LIKE\s+['"][%]/i.test(sql)) {
+              issues.push({
+                rule: 'trailing_wildcard_like',
+                severity: this.config.rules.trailing_wildcard_like.severity,
+                message: 'Trailing wildcard LIKE - ensure column is indexed',
+                line: this.findLineNumber(sql, /LIKE\s+['"][^%]*[%]['"]/i),
+                suggestion: 'Verify that the column has an appropriate index'
+              });
+              score -= this.config.rules.trailing_wildcard_like.points;
+            }
+
+            // Rule: ORDER BY without LIMIT
+            if (this.config.rules.no_limit_with_order.enabled) {
+              const hasOrderBy = /ORDER\s+BY/i.test(sql);
+              const hasLimit = /LIMIT/i.test(sql);
+              
+              if (hasOrderBy && !hasLimit) {
+                issues.push({
+                  rule: 'no_limit_with_order',
+                  severity: this.config.rules.no_limit_with_order.severity,
+                  message: 'ORDER BY without LIMIT - may sort unnecessary rows',
+                  line: this.findLineNumber(sql, /ORDER\s+BY/i),
+                  suggestion: 'Add LIMIT clause to restrict sorted results'
+                });
+                score -= this.config.rules.no_limit_with_order.points;
+              }
+            }
+
+            // Rule: Excessive JOINs
+            if (this.config.rules.excessive_joins.enabled) {
+              const joinCount = (sql.match(/\s+JOIN\s+/gi) || []).length;
+              const threshold = this.config.rules.excessive_joins.threshold || 6;
+              
+              if (joinCount > threshold) {
+                issues.push({
+                  rule: 'excessive_joins',
+                  severity: this.config.rules.excessive_joins.severity,
+                  message: `High number of JOINs (${joinCount}) - may cause performance issues`,
+                  line: 0,
+                  suggestion: 'Consider denormalizing data or breaking into multiple queries'
+                });
+                score -= this.config.rules.excessive_joins.points;
+              }
+            }
+
+            // Rule: Nested subqueries
+            if (this.config.rules.nested_subqueries.enabled) {
+              const subqueryCount = (sql.match(/SELECT.*FROM.*\(.*SELECT/gi) || []).length;
+              const threshold = this.config.rules.nested_subqueries.threshold || 3;
+              
+              if (subqueryCount > threshold) {
+                issues.push({
+                  rule: 'nested_subqueries',
+                  severity: this.config.rules.nested_subqueries.severity,
+                  message: `Multiple nested subqueries (${subqueryCount}) detected`,
+                  line: 0,
+                  suggestion: 'Consider using CTEs (WITH clause) or temporary tables'
+                });
+                score -= this.config.rules.nested_subqueries.points;
+              }
+            }
+
+            // Rule: SELECT DISTINCT
+            if (this.config.rules.select_distinct.enabled && /SELECT\s+DISTINCT/i.test(sql)) {
+              issues.push({
+                rule: 'select_distinct',
+                severity: this.config.rules.select_distinct.severity,
+                message: 'DISTINCT used - may indicate missing JOIN conditions or duplicates',
+                line: this.findLineNumber(sql, /SELECT\s+DISTINCT/i),
+                suggestion: 'Verify if DISTINCT is necessary or if query logic can be improved'
+              });
+              score -= this.config.rules.select_distinct.points;
+            }
+
+            // Rule: OR in WHERE clause
+            if (this.config.rules.or_in_where.enabled && /WHERE.*\sOR\s/i.test(sql)) {
+              const orCount = (sql.match(/\sOR\s/gi) || []).length;
+              if (orCount > 2) {
+                issues.push({
+                  rule: 'or_in_where',
+                  severity: this.config.rules.or_in_where.severity,
+                  message: 'Multiple OR conditions in WHERE - may not use indexes efficiently',
+                  line: this.findLineNumber(sql, /WHERE.*\sOR\s/i),
+                  suggestion: 'Consider using IN clause or UNION for better index usage'
+                });
+                score -= this.config.rules.or_in_where.points;
+              }
+            }
+
+            // Rule: NOT IN clause
+            if (this.config.rules.not_in_clause.enabled && /NOT\s+IN\s*\(/i.test(sql)) {
+              issues.push({
+                rule: 'not_in_clause',
+                severity: this.config.rules.not_in_clause.severity,
+                message: 'NOT IN clause detected - can be slow with large datasets',
+                line: this.findLineNumber(sql, /NOT\s+IN\s*\(/i),
+                suggestion: 'Consider using NOT EXISTS or LEFT JOIN with IS NULL instead'
+              });
+              score -= this.config.rules.not_in_clause.points;
+            }
+
+            // Rule: Implicit type conversion
+            if (this.config.rules.implicit_type_conversion.enabled) {
+              const patterns = [
+                /WHERE\s+\w+\s*=\s*['"]\d+['"]/i, // String compared to numeric column
+                /WHERE\s+\d+\s*=\s*\w+/i // Numeric literal compared to string column
+              ];
+
+              patterns.forEach(pattern => {
+                if (pattern.test(sql)) {
+                  issues.push({
+                    rule: 'implicit_type_conversion',
+                    severity: this.config.rules.implicit_type_conversion.severity,
+                    message: 'Possible implicit type conversion - prevents index usage',
+                    line: this.findLineNumber(sql, pattern),
+                    suggestion: 'Ensure data types match between column and comparison value'
+                  });
+                  score -= this.config.rules.implicit_type_conversion.points;
+                }
+              });
+            }
+
+            // Rule: UNION without ALL
+            if (this.config.rules.union_without_all.enabled && 
+                /UNION(?!\s+ALL)/i.test(sql) && 
+                /UNION/i.test(sql)) {
+              issues.push({
+                rule: 'union_without_all',
+                severity: this.config.rules.union_without_all.severity,
+                message: 'UNION without ALL - performs unnecessary DISTINCT operation',
+                line: this.findLineNumber(sql, /UNION/i),
+                suggestion: 'Use UNION ALL if duplicates are not a concern'
+              });
+              score -= this.config.rules.union_without_all.points;
+            }
+
+            // Rule: Missing table aliases in complex queries
+            if (this.config.rules.missing_table_alias.enabled) {
+              const hasJoin = /JOIN/i.test(sql);
+              const hasTableAlias = /FROM\s+\w+\s+(?:AS\s+)?\w+/i.test(sql);
+              
+              if (hasJoin && !hasTableAlias) {
+                issues.push({
+                  rule: 'missing_table_alias',
+                  severity: this.config.rules.missing_table_alias.severity,
+                  message: 'Table aliases missing in JOIN query - reduces readability',
+                  line: this.findLineNumber(sql, /FROM/i),
+                  suggestion: 'Use table aliases for better readability and maintenance'
+                });
+                score -= this.config.rules.missing_table_alias.points;
+              }
+            }
+
+            // Rule: CROSS JOIN
+            if (this.config.rules.cross_join.enabled && /CROSS\s+JOIN/i.test(sql)) {
+              issues.push({
+                rule: 'cross_join',
+                severity: this.config.rules.cross_join.severity,
+                message: 'CROSS JOIN detected - creates Cartesian product, usually unintentional',
+                line: this.findLineNumber(sql, /CROSS\s+JOIN/i),
+                suggestion: 'Verify if CROSS JOIN is intentional, add JOIN condition if not'
+              });
+              score -= this.config.rules.cross_join.points;
+            }
+
+            return {
+              score: Math.max(0, Math.min(100, score)),
+              issues,
+              complexity: this.calculateComplexity(sql)
+            };
+          }
+
+          calculateComplexity(sql) {
+            let complexity = 0;
+            
+            complexity += (sql.match(/JOIN/gi) || []).length * 2;
+            complexity += (sql.match(/SELECT/gi) || []).length;
+            complexity += (sql.match(/WHERE/gi) || []).length;
+            complexity += (sql.match(/GROUP\s+BY/gi) || []).length * 2;
+            complexity += (sql.match(/ORDER\s+BY/gi) || []).length;
+            complexity += (sql.match(/UNION/gi) || []).length * 2;
+            complexity += (sql.match(/CASE/gi) || []).length;
+            
+            return complexity;
+          }
+
+          findLineNumber(sql, pattern) {
+            const match = sql.match(pattern);
+            if (!match) return 0;
+            
+            const beforeMatch = sql.substring(0, match.index);
+            return beforeMatch.split('\n').length;
+          }
+
+          findSQLFiles(dir, files = []) {
+            if (!fs.existsSync(dir)) return files;
+
+            try {
+              const items = fs.readdirSync(dir);
+              
+              for (const item of items) {
+                const fullPath = path.join(dir, item);
+                
+                try {
+                  const stat = fs.statSync(fullPath);
+                  
+                  if (stat.isDirectory()) {
+                    // Skip common directories to ignore
+                    if (!['node_modules', '.git', 'dist', 'build', '.github'].includes(item)) {
+                      this.findSQLFiles(fullPath, files);
+                    }
+                  } else if (item.endsWith('.sql')) {
+                    files.push(fullPath);
+                  }
+                } catch (err) {
+                  console.warn(`Warning: Cannot access ${fullPath}:`, err.message);
+                }
+              }
+            } catch (err) {
+              console.warn(`Warning: Cannot read directory ${dir}:`, err.message);
+            }
+
+            return files;
+          }
+
+          analyze() {
+            const allSQLFiles = [];
+            
+            // Search in configured paths
+            for (const searchPath of this.config.paths) {
+              this.findSQLFiles(searchPath, allSQLFiles);
+            }
+
+            console.log(`Found ${allSQLFiles.length} SQL files`);
+
+            for (const file of allSQLFiles) {
+              if (!this.shouldAnalyzeFile(file)) {
+                console.log(`Skipping: ${file}`);
+                continue;
+              }
+
+              try {
+                const stats = fs.statSync(file);
+                
+                if (stats.size > this.config.max_file_size) {
+                  console.warn(`Skipping large file: ${file} (${stats.size} bytes)`);
+                  continue;
+                }
+
+                const content = fs.readFileSync(file, 'utf8');
+                
+                if (!content.trim()) {
+                  console.log(`Skipping empty file: ${file}`);
+                  continue;
+                }
+
+                const result = this.analyzeSQL(content, file);
+                
+                this.results.files.push({
+                  path: file,
+                  score: result.score,
+                  complexity: result.complexity,
+                  issues: result.issues
+                });
+
+                this.results.summary.total_files++;
+                this.results.summary.total_issues += result.issues.length;
+                
+                result.issues.forEach(issue => {
+                  if (issue.severity === 'error') {
+                    this.results.summary.critical_issues++;
+                  } else if (issue.severity === 'warning') {
+                    this.results.summary.warnings++;
+                  } else {
+                    this.results.summary.info++;
+                  }
+                });
+
+              } catch (err) {
+                console.error(`Error analyzing ${file}:`, err.message);
+              }
+            }
+
+            // Calculate average score
+            if (this.results.summary.total_files > 0) {
+              const totalScore = this.results.files.reduce((sum, f) => sum + f.score, 0);
+              this.results.summary.average_score = Math.round(totalScore / this.results.summary.total_files);
+            } else {
+              this.results.summary.average_score = 100;
+            }
+
+            return this.results;
+          }
+
+          generateReport() {
+            console.log('\n' + '='.repeat(80));
+            console.log('SQL ANALYSIS REPORT');
+            console.log('='.repeat(80));
+            console.log(`\nFiles Analyzed: ${this.results.summary.total_files}`);
+            console.log(`Average Score: ${this.results.summary.average_score}/100`);
+            console.log(`Total Issues: ${this.results.summary.total_issues}`);
+            console.log(`  - Critical: ${this.results.summary.critical_issues}`);
+            console.log(`  - Warnings: ${this.results.summary.warnings}`);
+            console.log(`  - Info: ${this.results.summary.info}`);
+            
+            const failedFiles = this.results.files.filter(f => f.score < this.config.min_score);
+            
+            if (failedFiles.length > 0) {
+              console.log(`\n⚠️  ${failedFiles.length} files below minimum score (${this.config.min_score})`);
+            }
+
+            console.log('\n' + '-'.repeat(80));
+            console.log('DETAILED RESULTS');
+            console.log('-'.repeat(80));
+
+            for (const file of this.results.files) {
+              const status = file.score >= this.config.min_score ? '✓' : '✗';
+              console.log(`\n${status} ${file.path}`);
+              console.log(`  Score: ${file.score}/100 | Complexity: ${file.complexity} | Issues: ${file.issues.length}`);
+              
+              if (file.issues.length > 0) {
+                file.issues.forEach(issue => {
+                  const icon = issue.severity === 'error' ? '❌' : 
+                               issue.severity === 'warning' ? '⚠️' : 'ℹ️';
+                  console.log(`  ${icon} [${issue.rule}] Line ${issue.line}: ${issue.message}`);
+                  console.log(`     → ${issue.suggestion}`);
+                });
+              }
+            }
+
+            console.log('\n' + '='.repeat(80));
+            
+            return this.results.summary.average_score >= this.config.min_score &&
+                   this.results.summary.critical_issues === 0;
+          }
+
+          saveResults() {
+            // Save JSON report
+            fs.writeFileSync(
+              'sql-analysis-report.json',
+              JSON.stringify(this.results, null, 2)
+            );
+            console.log('\n📄 Report saved to: sql-analysis-report.json');
+
+            // Set GitHub Actions outputs
+            if (process.env.GITHUB_OUTPUT) {
+              const output = [
+                `average_score=${this.results.summary.average_score}`,
+                `total_files=${this.results.summary.total_files}`,
+                `total_issues=${this.results.summary.total_issues}`,
+                `critical_issues=${this.results.summary.critical_issues}`,
+                `warnings=${this.results.summary.warnings}`,
+                `has_failures=${this.results.summary.average_score < this.config.min_score || this.results.summary.critical_issues > 0}`
+              ].join('\n');
+              
+              fs.appendFileSync(process.env.GITHUB_OUTPUT, output + '\n');
+            }
+          }
+        }
+
+        // Main execution
+        const analyzer = new SQLAnalyzer();
+        const results = analyzer.analyze();
+        const passed = analyzer.generateReport();
+        analyzer.saveResults();
+
+        process.exit(passed ? 0 : 1);
+        ANALYZER_EOF
+
+    - name: Run SQL Analysis
+      id: analyze
+      continue-on-error: true
+      run: node analyze-sql.js
+
+    - name: Upload Analysis Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: sql-analysis-report
+        path: sql-analysis-report.json
+        retention-days: 30
+
+    - name: Comment on PR
+      if: github.event_name == 'pull_request' && always()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          if (!fs.existsSync('sql-analysis-report.json')) {
+            console.log('No report found, skipping comment');
+            return;
+          }
+          
+          const report = JSON.parse(fs.readFileSync('sql-analysis-report.json', 'utf8'));
+          const summary = report.summary;
+          
+          const status = summary.average_score >= 70 && summary.critical_issues === 0 ? '✅' : '❌';
+          const scoreEmoji = summary.average_score >= 90 ? '🌟' : 
+                             summary.average_score >= 70 ? '👍' : 
+                             summary.average_score >= 50 ? '⚠️' : '🚨';
+          
+          let comment = `## ${status} SQL Quality Analysis Report\n\n`;
+          comment += `### Summary\n`;
+          comment += `${scoreEmoji} **Average Score:** ${summary.average_score}/100\n`;
+          comment += `📊 **Files Analyzed:** ${summary.total_files}\n`;
+          comment += `🔍 **Total Issues:** ${summary.total_issues}\n`;
+          comment += `- ❌ Critical: ${summary.critical_issues}\n`;
+          comment += `- ⚠️ Warnings: ${summary.warnings}\n`;
+          comment += `- ℹ️ Info: ${summary.info}\n\n`;
+          
+          const filesWithIssues = report.files.filter(f => f.issues.length > 0).slice(0, 5);
+          
+          if (filesWithIssues.length > 0) {
+            comment += `### Top Issues\n\n`;
+            
+            for (const file of filesWithIssues) {
+              comment += `#### 📄 \`${file.path}\` (Score: ${file.score}/100)\n`;
+              
+              const criticalIssues = file.issues.filter(i => i.severity === 'error').slice(0, 3);
+              const warningIssues = file.issues.filter(i => i.severity === 'warning').slice(0, 2);
+              
+              [...criticalIssues, ...warningIssues].forEach(issue => {
+                const icon = issue.severity === 'error' ? '❌' : '⚠️';
+                comment += `${icon} **Line ${issue.line}:** ${issue.message}\n`;
+                comment += `   💡 ${issue.suggestion}\n\n`;
+              });
+            }
+            
+            if (report.files.filter(f => f.issues.length > 0).length > 5) {
+              comment += `\n*...and ${report.files.filter(f => f.issues.length > 0).length - 5} more files with issues*\n`;
+            }
+          }
+          
+          comment += `\n---\n`;
+          comment += `📥 [Download full report](${process.env.GITHUB_SERVER_URL}/${process.env.GITHUB_REPOSITORY}/actions/runs/${process.env.GITHUB_RUN_ID})\n`;
+          
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+          
+          const botComment = comments.find(comment => 
+            comment.user.type === 'Bot' && 
+            comment.body.includes('SQL Quality Analysis Report')
+          );
+          
+          if (botComment) {
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: comment
+            });
+          } else {
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+          }
+
+    - name: Check Analysis Results
+      if: always()
+      run: |
+        if [ -f sql-analysis-report.json ]; then
+          SCORE=$(jq -r '.summary.average_score' sql-analysis-report.json)
+          CRITICAL=$(jq -r '.summary.critical_issues' sql-analysis-report.json)
+          
+          echo "Average Score: $SCORE"
+          echo "Critical Issues: $CRITICAL"
+          
+          if [ "$SCORE" -lt 70 ] || [ "$CRITICAL" -gt 0 ]; then
+            echo "❌ SQL quality check failed!"
+            echo "Minimum score required: 70"
+            echo "Critical issues must be: 0"
+            exit 1
+          fi
+          
+          echo "✅ SQL quality check passed!"
+        else
+          echo "⚠️ No SQL files found to analyze"
+          exit 0
+        fi

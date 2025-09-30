@@ -1,0 +1,383 @@
+name: SQL Query Analysis
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths: 
+      - 'sql/**/*.sql'
+      - 'migrations/**/*.sql'
+      - 'queries/**/*.sql'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'sql/**/*.sql'
+      - 'migrations/**/*.sql'
+      - 'queries/**/*.sql'
+  workflow_dispatch:
+    inputs:
+      sql_files_path:
+        description: 'Path to SQL files (optional)'
+        required: false
+        default: '.'
+
+jobs:
+  analyze-sql:
+    runs-on: ubuntu-latest
+    outputs:
+      average_score: ${{ steps.analysis.outputs.average_score }}
+      files_analyzed: ${{ steps.analysis.outputs.files_analyzed }}
+      has_high_complexity: ${{ steps.analysis.outputs.has_high_complexity }}
+      has_performance_issues: ${{ steps.analysis.outputs.has_performance_issues }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+
+    - name: Create SQL Analyzer Script
+      run: |
+        cat > analyze-sql.js << 'EOF'
+        const fs = require('fs');
+        const path = require('path');
+
+        class SQLAnalyzer {
+          analyzeSQL(sql) {
+            const upperSQL = sql.toUpperCase();
+            
+            const metrics = {
+              lineCount: sql.split('\n').length,
+              charCount: sql.length,
+              wordCount: sql.split(/\s+/).length,
+              tableCount: this.countTables(sql),
+              joinCount: this.countJoins(sql),
+              subqueryCount: this.countSubqueries(sql),
+              functionCount: this.countFunctions(sql),
+              conditionCount: this.countConditions(sql)
+            };
+
+            const complexity = this.calculateComplexity(sql, metrics);
+            const performance = this.analyzePerformance(sql);
+            const patterns = this.detectPatterns(sql);
+            const suggestions = this.generateSuggestions(sql, performance, patterns);
+            const score = this.calculateScore(complexity, performance, metrics);
+
+            return { metrics, complexity, performance, patterns, suggestions, score };
+          }
+
+          countTables(sql) {
+            const fromMatch = sql.match(/FROM\s+(\w+)/gi);
+            const joinMatch = sql.match(/JOIN\s+(\w+)/gi);
+            const tables = new Set();
+            
+            if (fromMatch) fromMatch.forEach(match => tables.add(match.split(/\s+/)[1].toLowerCase()));
+            if (joinMatch) joinMatch.forEach(match => tables.add(match.split(/\s+/)[1].toLowerCase()));
+            
+            return tables.size;
+          }
+
+          countJoins(sql) {
+            return (sql.match(/\bJOIN\b/gi) || []).length;
+          }
+
+          countSubqueries(sql) {
+            let count = 0, depth = 0, inString = false, stringChar = '';
+            
+            for (let i = 0; i < sql.length; i++) {
+              const char = sql[i];
+              if (!inString && (char === '"' || char === "'")) {
+                inString = true;
+                stringChar = char;
+              } else if (inString && char === stringChar) {
+                inString = false;
+              } else if (!inString) {
+                if (char === '(') depth++;
+                else if (char === ')') depth--;
+                else if (depth > 0 && sql.substr(i, 6).toUpperCase() === 'SELECT') count++;
+              }
+            }
+            return count;
+          }
+
+          countFunctions(sql) {
+            const functions = ['COUNT', 'SUM', 'AVG', 'MAX', 'MIN', 'CONCAT', 'SUBSTRING', 'LENGTH', 'UPPER', 'LOWER'];
+            return functions.reduce((count, func) => {
+              const matches = sql.match(new RegExp(`\\b${func}\\s*\\(`, 'gi'));
+              return count + (matches ? matches.length : 0);
+            }, 0);
+          }
+
+          countConditions(sql) {
+            const whereMatch = sql.match(/WHERE\s+(.+?)(?:\s+GROUP\s+BY|\s+ORDER\s+BY|\s+LIMIT|$)/i);
+            if (!whereMatch) return 0;
+            return whereMatch[1].split(/\s+AND\s+|\s+OR\s+/gi).length;
+          }
+
+          calculateComplexity(sql, metrics) {
+            let score = metrics.lineCount * 0.5 + metrics.joinCount * 3 + 
+                       metrics.subqueryCount * 5 + metrics.functionCount + metrics.conditionCount * 2;
+            
+            if (sql.includes('UNION')) score += 4;
+            if (sql.includes('HAVING')) score += 2;
+            if (sql.includes('EXISTS')) score += 3;
+            if (sql.includes('CASE')) score += 2;
+            
+            const level = score < 10 ? 'Low' : score < 25 ? 'Medium' : 'High';
+            return { level, score: Math.round(score) };
+          }
+
+          analyzePerformance(sql) {
+            const issues = [], warnings = [];
+            
+            if (sql.includes('SELECT *')) issues.push('Using SELECT * can impact performance');
+            if (!sql.includes('WHERE') && sql.includes('FROM')) warnings.push('No WHERE clause - may scan entire table');
+            if (/WHERE.*\b(UPPER|LOWER|SUBSTRING|LENGTH)\(/i.test(sql)) issues.push('Functions in WHERE clause prevent index usage');
+            if (sql.includes("LIKE '%")) issues.push('LIKE with leading wildcard prevents index usage');
+            if (/WHERE.*\bOR\b/i.test(sql)) warnings.push('OR conditions can be slower than UNION');
+            if (sql.includes('ORDER BY') && !sql.includes('LIMIT')) warnings.push('ORDER BY without LIMIT may sort entire result set');
+            
+            return { issues, warnings };
+          }
+
+          detectPatterns(sql) {
+            const patterns = [];
+            const checks = {
+              'GROUP BY': 'Aggregation', 'JOIN': 'Join Operation', 'UNION': 'Set Operation',
+              'EXISTS': 'Existence Check', 'HAVING': 'Group Filtering', 'CASE': 'Conditional Logic',
+              'LIMIT': 'Result Limiting', 'DISTINCT': 'Deduplication', 'ORDER BY': 'Sorting'
+            };
+            
+            Object.entries(checks).forEach(([keyword, pattern]) => {
+              if (sql.includes(keyword)) patterns.push(pattern);
+            });
+            if (this.countSubqueries(sql) > 0) patterns.push('Subquery');
+            
+            return patterns;
+          }
+
+          generateSuggestions(sql, performance, patterns) {
+            const suggestions = [];
+            
+            if (performance.issues.length > 0) {
+              suggestions.push('Consider adding indexes on columns used in WHERE clauses');
+              suggestions.push('Avoid functions in WHERE conditions when possible');
+            }
+            if (sql.includes('SELECT *')) suggestions.push('Specify only required columns instead of SELECT *');
+            if (sql.includes("LIKE '%")) suggestions.push('Consider full-text search instead of LIKE with leading wildcards');
+            if (patterns.includes('Subquery')) suggestions.push('Consider if subqueries can be replaced with JOINs');
+            if (patterns.includes('Join Operation') && this.countJoins(sql) > 3) {
+              suggestions.push('Review join order and consider breaking complex queries into smaller ones');
+            }
+            if (!sql.includes('LIMIT') && patterns.includes('Sorting')) suggestions.push('Add LIMIT clause if you only need a subset');
+            
+            suggestions.push('Test query performance with realistic data volumes');
+            suggestions.push('Consider using EXPLAIN PLAN to analyze execution strategy');
+            
+            return suggestions;
+          }
+
+          calculateScore(complexity, performance, metrics) {
+            let score = 85;
+            if (complexity.level === 'High') score -= 20;
+            else if (complexity.level === 'Medium') score -= 10;
+            score -= performance.issues.length * 5 + performance.warnings.length * 3;
+            if (metrics.lineCount > 20) score -= 5;
+            if (metrics.joinCount > 5) score -= 5;
+            return Math.max(0, Math.min(100, score));
+          }
+        }
+
+        async function main() {
+          const analyzer = new SQLAnalyzer();
+          const sqlPath = process.env.SQL_FILES_PATH || '.';
+          
+          console.log('='.repeat(50));
+          console.log('🔍 SQL Query Analysis Report');
+          console.log('='.repeat(50));
+          
+          let allResults = [], totalScore = 0, fileCount = 0;
+          let hasHighComplexity = false, hasPerformanceIssues = false;
+
+          function findSQLFiles(dir) {
+            const files = [];
+            if (!fs.existsSync(dir)) {
+              console.log(`Directory ${dir} not found`);
+              return files;
+            }
+            
+            fs.readdirSync(dir).forEach(item => {
+              const fullPath = path.join(dir, item);
+              const stat = fs.statSync(fullPath);
+              
+              if (stat.isDirectory()) files.push(...findSQLFiles(fullPath));
+              else if (item.endsWith('.sql')) files.push(fullPath);
+            });
+            return files;
+          }
+
+          const sqlFiles = findSQLFiles(sqlPath);
+          
+          if (sqlFiles.length === 0) {
+            console.log(`No SQL files found in ${sqlPath}`);
+            process.exit(0);
+          }
+
+          for (const filePath of sqlFiles) {
+            try {
+              const content = fs.readFileSync(filePath, 'utf8');
+              if (!content.trim()) continue;
+              
+              const result = analyzer.analyzeSQL(content);
+              result.filePath = filePath;
+              allResults.push(result);
+              
+              console.log(`\n📄 File: ${filePath}`);
+              console.log(`   Score: ${result.score}/100`);
+              console.log(`   Complexity: ${result.complexity.level} (${result.complexity.score})`);
+              console.log(`   Issues: ${result.performance.issues.length} | Warnings: ${result.performance.warnings.length}`);
+              
+              if (result.complexity.level === 'High') hasHighComplexity = true;
+              if (result.performance.issues.length > 0) hasPerformanceIssues = true;
+              
+              totalScore += result.score;
+              fileCount++;
+            } catch (error) {
+              console.log(`Error analyzing ${filePath}: ${error.message}`);
+            }
+          }
+
+          const avgScore = Math.round(totalScore / fileCount);
+          console.log('\n' + '='.repeat(50));
+          console.log('📊 ANALYSIS SUMMARY');
+          console.log('='.repeat(50));
+          console.log(`Files analyzed: ${fileCount}`);
+          console.log(`Average score: ${avgScore}/100`);
+          console.log(`High complexity queries: ${allResults.filter(r => r.complexity.level === 'High').length}`);
+          console.log(`Performance issues: ${allResults.filter(r => r.performance.issues.length > 0).length}`);
+
+          const problematicFiles = allResults.filter(r => 
+            r.score < 70 || r.complexity.level === 'High' || r.performance.issues.length > 0
+          );
+
+          if (problematicFiles.length > 0) {
+            console.log('\n⚠️  FILES REQUIRING ATTENTION:');
+            console.log('-'.repeat(50));
+            
+            problematicFiles.forEach(result => {
+              console.log(`\n📄 ${result.filePath}`);
+              console.log(`   Score: ${result.score}/100`);
+              console.log(`   Complexity: ${result.complexity.level}`);
+              
+              if (result.performance.issues.length > 0) {
+                console.log('   Issues:');
+                result.performance.issues.forEach(issue => console.log(`     • ${issue}`));
+              }
+              if (result.performance.warnings.length > 0) {
+                console.log('   Warnings:');
+                result.performance.warnings.forEach(w => console.log(`     • ${w}`));
+              }
+              console.log('   Top Suggestions:');
+              result.suggestions.slice(0, 3).forEach(s => console.log(`     • ${s}`));
+            });
+          }
+
+          const reportData = {
+            timestamp: new Date().toISOString(),
+            summary: {
+              filesAnalyzed: fileCount,
+              averageScore: avgScore,
+              highComplexityCount: allResults.filter(r => r.complexity.level === 'High').length,
+              issueCount: allResults.filter(r => r.performance.issues.length > 0).length
+            },
+            results: allResults
+          };
+
+          fs.writeFileSync('sql-analysis-report.json', JSON.stringify(reportData, null, 2));
+          console.log('\n💾 Report saved to sql-analysis-report.json');
+
+          if (process.env.GITHUB_ACTIONS) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `average_score=${avgScore}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `files_analyzed=${fileCount}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_high_complexity=${hasHighComplexity}\n`);
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, `has_performance_issues=${hasPerformanceIssues}\n`);
+          }
+
+          if (avgScore < 60 || hasHighComplexity) {
+            console.log('\n❌ Critical issues found');
+            process.exit(1);
+          }
+
+          console.log('\n✅ Analysis completed successfully');
+        }
+
+        main().catch(console.error);
+        EOF
+
+    - name: Run SQL Analysis
+      id: analysis
+      env:
+        SQL_FILES_PATH: ${{ github.event.inputs.sql_files_path || '.' }}
+      run: node analyze-sql.js
+
+    - name: Upload Analysis Report
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: sql-analysis-report
+        path: sql-analysis-report.json
+
+    - name: Comment PR with Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          if (!fs.existsSync('sql-analysis-report.json')) return;
+          
+          const report = JSON.parse(fs.readFileSync('sql-analysis-report.json', 'utf8'));
+          const problematic = report.results.filter(r => 
+            r.score < 70 || r.complexity.level === 'High' || r.performance.issues.length > 0
+          );
+          
+          let comment = `## 🔍 SQL Analysis Report\n\n**Summary:**\n`;
+          comment += `- Files: ${report.summary.filesAnalyzed}\n`;
+          comment += `- Avg Score: ${report.summary.averageScore}/100\n`;
+          comment += `- High Complexity: ${report.summary.highComplexityCount}\n`;
+          comment += `- Issues: ${report.summary.issueCount}\n\n`;
+          
+          if (problematic.length > 0) {
+            comment += `**Files needing attention:**\n\n`;
+            problematic.slice(0, 5).forEach(r => {
+              comment += `### 📄 \`${r.filePath}\`\n`;
+              comment += `- Score: ${r.score}/100 | Complexity: ${r.complexity.level}\n`;
+              if (r.performance.issues.length > 0) {
+                comment += `- Issues: ${r.performance.issues.slice(0, 2).join(', ')}\n`;
+              }
+              comment += '\n';
+            });
+          }
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  quality-gate:
+    runs-on: ubuntu-latest
+    needs: analyze-sql
+    if: always()
+    steps:
+    - name: Check Quality Gate
+      run: |
+        if [ "${{ needs.analyze-sql.result }}" = "failure" ]; then
+          echo "❌ SQL quality gate failed"
+          exit 1
+        fi
+        echo "✅ SQL quality gate passed"
